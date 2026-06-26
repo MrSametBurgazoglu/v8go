@@ -670,6 +670,37 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
       goFunctionCallback(ctx_ref, callback_ref, thisAndArgs, args_count);
   if (val != nullptr) {
     info.GetReturnValue().Set(val->ptr.Get(iso));
+
+    // Release the freshly-created return value. Once Set() copies its Local
+    // into V8's return slot, V8 roots the underlying value for as long as JS
+    // needs it; our m_value wrapper (and the strong Global<Value> it holds)
+    // is dead weight from here on. Go callbacks build return values with
+    // NewValue(iso, ...), which tracks them in the *isolate's internal*
+    // context (iso->GetData(0)->vals) — freed only at IsolateDispose, never
+    // at the per-call Context::Close. There is no finalizer on the Go *Value
+    // either, so without this drop every callback return value leaks a
+    // strongly-reachable pin for the isolate's whole lifetime. A JS Proxy
+    // that calls a host function on every property access (see the deskbot
+    // msgbridge) turns that into unbounded, un-GC-able heap growth and a
+    // "last resort GC frees 0 bytes" CALL_AND_RETRY_LAST OOM.
+    //
+    // Guard: a callback may legitimately return `this` or one of its args,
+    // which are tracked in the *current* (per-call) context and freed at its
+    // Close. Deleting one here would double-free. Skip those by identity.
+    bool aliasesThisOrArg = false;
+    for (int i = 0; i <= args_count; i++) {
+      if (thisAndArgs[i] == val) {
+        aliasesThisOrArg = true;
+        break;
+      }
+    }
+    if (!aliasesThisOrArg) {
+      if (val->id != 0 && val->ctx != nullptr) {
+        val->ctx->vals.erase(val->id);
+      }
+      val->ptr.Reset();
+      delete val;
+    }
   } else {
     info.GetReturnValue().SetUndefined();
   }
@@ -753,6 +784,15 @@ ContextPtr NewContext(IsolatePtr iso,
   ctx->ptr.Reset(iso, local_ctx);
   ctx->iso = iso;
   return ctx;
+}
+
+// IsolateInternalContextValueCount returns the number of m_value wrappers
+// tracked against the isolate's internal context (iso->GetData(0)). Values
+// created via NewValue(iso, ...) — including those a FunctionTemplate callback
+// builds for its return value — land here and live until IsolateDispose.
+// Test-only observability for the callback-return-value leak regression.
+int IsolateInternalContextValueCount(IsolatePtr iso) {
+  return isolateInternalContext(iso)->vals.size();
 }
 
 int ContextRetainedValueCount(ContextPtr ctx) {

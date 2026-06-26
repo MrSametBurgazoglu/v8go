@@ -215,6 +215,17 @@ func (i *Isolate) IsExecutionTerminating() bool {
 	return C.IsolateIsExecutionTerminating(i.ptr) == 1
 }
 
+// InternalContextValueCount returns the number of m_value wrappers tracked
+// against the isolate's internal context (iso->GetData(0)). Values created
+// with NewValue(iso, ...) — including those a FunctionTemplate callback builds
+// for its return value — are tracked here and live until the isolate is
+// disposed. A flat count across many callback invocations is the invariant
+// the return-value release in FunctionTemplateCallback maintains; a count that
+// grows with call volume is the leak that OOM'd long-running flows.
+func (i *Isolate) InternalContextValueCount() int {
+	return int(C.IsolateInternalContextValueCount(i.ptr))
+}
+
 type CompileOptions struct {
 	CachedData *CompilerCachedData
 

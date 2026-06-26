@@ -163,6 +163,7 @@ extern void IsolatePerformMicrotaskCheckpoint(IsolatePtr ptr);
 extern void IsolateDispose(IsolatePtr ptr);
 extern void IsolateTerminateExecution(IsolatePtr ptr);
 extern int IsolateIsExecutionTerminating(IsolatePtr ptr);
+extern int IsolateInternalContextValueCount(IsolatePtr ptr);
 extern IsolateHStatistics IsolationGetHeapStatistics(IsolatePtr ptr);
 extern void IsolateAddNearHeapLimitCallback(IsolatePtr ptr);
 extern void IsolateRemoveNearHeapLimitCallback(IsolatePtr ptr,

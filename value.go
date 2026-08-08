@@ -601,6 +601,63 @@ func (v *Value) SharedArrayBufferGetContents() ([]byte, func(), error) {
 	return byte_slice, release, nil
 }
 
+// ArrayBufferBytes returns a zero-copy view over an ArrayBuffer's backing
+// store. The returned slice shares memory with V8; mutations are visible to
+// JavaScript. Call release when done to drop the backing-store reference
+// held open for the slice's lifetime.
+func (v *Value) ArrayBufferBytes() ([]byte, func(), error) {
+	if !v.IsArrayBuffer() {
+		return nil, nil, errors.New("v8go: value is not an ArrayBuffer")
+	}
+
+	backingStore := C.ArrayBufferGetBackingStore(v.ptr)
+	release := func() {
+		C.BackingStoreRelease(backingStore)
+	}
+
+	byte_ptr := (*byte)(unsafe.Pointer(C.BackingStoreData(backingStore)))
+	byte_size := C.BackingStoreByteLength(backingStore)
+	byte_slice := unsafe.Slice(byte_ptr, byte_size)
+
+	return byte_slice, release, nil
+}
+
+// TypedArrayBytes returns a zero-copy view over a TypedArray's underlying
+// ArrayBuffer, sliced to the view's byteOffset/byteLength. The returned slice
+// shares memory with V8. Call release when done.
+func (v *Value) TypedArrayBytes() ([]byte, int, int, func(), error) {
+	if !v.IsTypedArray() {
+		return nil, 0, 0, nil, errors.New("v8go: value is not a TypedArray")
+	}
+
+	backingStore := C.TypedArrayGetBuffer(v.ptr)
+	release := func() {
+		C.BackingStoreRelease(backingStore)
+	}
+
+	byte_offset := int(C.TypedArrayByteOffset(v.ptr))
+	byte_length := int(C.TypedArrayByteLength(v.ptr))
+
+	byte_ptr := (*byte)(unsafe.Pointer(C.BackingStoreData(backingStore)))
+	byte_size := C.BackingStoreByteLength(backingStore)
+	full_slice := unsafe.Slice(byte_ptr, byte_size)
+
+	return full_slice[byte_offset : byte_offset+byte_length : byte_offset+byte_length], byte_offset, byte_length, release, nil
+}
+
+// NewArrayBuffer creates a new ArrayBuffer by copying data into V8-owned
+// storage. The input slice may be reused or freed immediately. Pass nil or an
+// empty slice for a zero-length ArrayBuffer.
+func NewArrayBuffer(iso *Isolate, data []byte) *Value {
+	var data_ptr unsafe.Pointer
+	if len(data) > 0 {
+		data_ptr = unsafe.Pointer(&data[0])
+	}
+	return &Value{
+		ptr: C.NewArrayBuffer(iso.ptr, data_ptr, C.int(len(data))),
+	}
+}
+
 // External one-byte strings — see NewExternalOneByteValue.
 //
 // V8 holds a pointer into caller-owned memory rather than copying the

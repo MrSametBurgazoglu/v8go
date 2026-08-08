@@ -356,9 +356,18 @@ const char* Version();
 extern void SetFlags(const char* flags);
 
 extern BackingStorePtr SharedArrayBufferGetBackingStore(ValuePtr ptr);
+extern BackingStorePtr ArrayBufferGetBackingStore(ValuePtr ptr);
+extern BackingStorePtr TypedArrayGetBuffer(ValuePtr ptr);
+extern size_t TypedArrayByteOffset(ValuePtr ptr);
+extern size_t TypedArrayByteLength(ValuePtr ptr);
 extern void BackingStoreRelease(BackingStorePtr ptr);
 extern void* BackingStoreData(BackingStorePtr ptr);
 extern size_t BackingStoreByteLength(BackingStorePtr ptr);
+
+// NewArrayBuffer creates a new ArrayBuffer whose contents are copied into
+// V8-owned storage from |data| (|length| bytes). The caller's buffer may be
+// freed immediately after the call returns.
+extern ValuePtr NewArrayBuffer(IsolatePtr iso_ptr, void* data, int length);
 
 #ifdef __cplusplus
 }  // extern "C"

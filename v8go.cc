@@ -1943,6 +1943,56 @@ BackingStorePtr SharedArrayBufferGetBackingStore(ValuePtr ptr) {
   return proxy;
 }
 
+BackingStorePtr ArrayBufferGetBackingStore(ValuePtr ptr) {
+  LOCAL_VALUE(ptr);
+  auto buffer = Local<ArrayBuffer>::Cast(value);
+  auto backing_store = buffer->GetBackingStore();
+  auto proxy = new v8BackingStore(std::move(backing_store));
+  return proxy;
+}
+
+BackingStorePtr TypedArrayGetBuffer(ValuePtr ptr) {
+  LOCAL_VALUE(ptr);
+  auto view = Local<TypedArray>::Cast(value);
+  auto backing_store = view->Buffer()->GetBackingStore();
+  auto proxy = new v8BackingStore(std::move(backing_store));
+  return proxy;
+}
+
+size_t TypedArrayByteOffset(ValuePtr ptr) {
+  LOCAL_VALUE(ptr);
+  auto view = Local<TypedArray>::Cast(value);
+  return view->ByteOffset();
+}
+
+size_t TypedArrayByteLength(ValuePtr ptr) {
+  LOCAL_VALUE(ptr);
+  auto view = Local<TypedArray>::Cast(value);
+  return view->ByteLength();
+}
+
+// V8 14.7 dropped the ArrayBuffer::New(data, len, kInternalized) overload, so
+// we allocate via ArrayBuffer::New(iso, byte_length) (V8-owned memory) and copy
+// the bytes into the freshly created buffer's Data(). The caller's buffer may
+// be freed as soon as this returns. A Context::Scope is required because
+// ArrayBuffer::New builds a JS object (it looks up the native context for the
+// initial map / prototype), unlike Integer/String::New.
+ValuePtr NewArrayBuffer(IsolatePtr iso, void* data, int length) {
+  ISOLATE_SCOPE(iso);
+  m_ctx* ctx = isolateInternalContext(iso);
+  Context::Scope context_scope(ctx->ptr.Get(iso));
+  Local<ArrayBuffer> buffer = ArrayBuffer::New(iso, static_cast<size_t>(length));
+  if (length > 0) {
+    std::memcpy(buffer->Data(), data, static_cast<size_t>(length));
+  }
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, buffer);
+  return tracked_value(ctx, val);
+}
+
 void BackingStoreRelease(BackingStorePtr ptr) {
   if (ptr == nullptr) {
     return;

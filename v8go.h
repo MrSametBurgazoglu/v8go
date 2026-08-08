@@ -160,6 +160,7 @@ extern void Init();
 extern IsolatePtr NewIsolate();
 extern IsolatePtr NewIsolateWithOptions(IsolateOptions opts);
 extern void IsolatePerformMicrotaskCheckpoint(IsolatePtr ptr);
+extern void IsolateSetMicrotasksPolicy(IsolatePtr ptr, int policy);
 extern void IsolateDispose(IsolatePtr ptr);
 extern void IsolateTerminateExecution(IsolatePtr ptr);
 extern int IsolateIsExecutionTerminating(IsolatePtr ptr);

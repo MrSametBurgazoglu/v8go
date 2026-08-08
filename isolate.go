@@ -269,6 +269,40 @@ func (i *Isolate) IsExecutionTerminating() bool {
 	return C.IsolateIsExecutionTerminating(i.ptr) == 1
 }
 
+// MicrotasksPolicy selects when V8 drains the microtask queue.
+//
+// V8 14.7 defines three policies (kExplicit, kScoped, kAuto); v8go exposes
+// only the two that matter for embedders: MicrotasksAuto (the V8 default,
+// drained automatically at the end of every script) and MicrotasksExplicit
+// (microtasks are deferred until the embedder calls PerformMicrotaskCheckpoint).
+const (
+	MicrotasksAuto MicrotasksPolicy = iota
+	MicrotasksExplicit
+)
+
+// MicrotasksPolicy mirrors v8::MicrotasksPolicy for the auto/explicit choice.
+type MicrotasksPolicy int
+
+// SetMicrotasksPolicy configures when V8 drains pending microtasks. With
+// MicrotasksExplicit the caller controls draining via PerformMicrotaskCheckpoint;
+// with MicrotasksAuto V8 drains at the end of every script.
+func (i *Isolate) SetMicrotasksPolicy(p MicrotasksPolicy) {
+	if i.ptr == nil {
+		return
+	}
+	C.IsolateSetMicrotasksPolicy(i.ptr, C.int(p))
+}
+
+// PerformMicrotaskCheckpoint runs the isolate's default MicrotaskQueue until
+// empty. Under MicrotasksExplicit this is the only way microtasks run; under
+// MicrotasksAuto it is a no-op drain (the queue is already empty).
+func (i *Isolate) PerformMicrotaskCheckpoint() {
+	if i.ptr == nil {
+		return
+	}
+	C.IsolatePerformMicrotaskCheckpoint(i.ptr)
+}
+
 // InternalContextValueCount returns the number of m_value wrappers tracked
 // against the isolate's internal context (iso->GetData(0)). Values created
 // with NewValue(iso, ...) — including those a FunctionTemplate callback builds

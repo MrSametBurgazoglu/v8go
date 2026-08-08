@@ -217,6 +217,15 @@ void IsolatePerformMicrotaskCheckpoint(IsolatePtr iso) {
   iso->PerformMicrotaskCheckpoint();
 }
 
+void IsolateSetMicrotasksPolicy(IsolatePtr iso, int policy) {
+  if (iso == nullptr) {
+    return;
+  }
+  ISOLATE_SCOPE(iso)
+  iso->SetMicrotasksPolicy(policy != 0 ? v8::MicrotasksPolicy::kExplicit
+                                        : v8::MicrotasksPolicy::kAuto);
+}
+
 void IsolateDispose(IsolatePtr iso) {
   if (iso == nullptr) {
     return;

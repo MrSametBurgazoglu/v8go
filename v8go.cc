@@ -273,6 +273,45 @@ void IsolateAutomaticallyRestoreInitialHeapLimit(IsolatePtr iso,
   iso->AutomaticallyRestoreInitialHeapLimit(threshold);
 }
 
+// promiseRejectTrampoline has the signature V8 requires
+// (void(*)(PromiseRejectMessage)). It is registered per-isolate via
+// Isolate::SetPromiseRejectCallback and fires whenever a promise is
+// rejected (event kPromiseRejectWithNoHandler) or a handler is attached
+// after rejection (kPromiseHandlerAddedAfterReject), etc.
+//
+// V8 invokes the callback during JS execution on the firing isolate, so
+// Isolate::GetCurrent() recovers it without a data parameter (the V8
+// callback type has none). The rejection value is wrapped in a transient
+// m_value whose Global<Value> keeps it alive for the Go callback's
+// synchronous read. The wrapper is freed immediately after the callback
+// returns — callers must NOT retain the ValuePtr.
+void promiseRejectTrampoline(PromiseRejectMessage msg) {
+  Isolate* iso = Isolate::GetCurrent();
+  ISOLATE_SCOPE(iso)
+  m_ctx* ctx = isolateInternalContext(iso);
+  Local<Context> local_ctx = ctx->ptr.Get(iso);
+  Context::Scope context_scope(local_ctx);
+
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, msg.GetValue());
+
+  goPromiseRejectCallback(iso, static_cast<int>(msg.GetEvent()), val);
+
+  val->ptr.Reset();
+  delete val;
+}
+
+void IsolateSetPromiseRejectCallback(IsolatePtr iso) {
+  if (iso == nullptr) {
+    return;
+  }
+  ISOLATE_SCOPE(iso)
+  iso->SetPromiseRejectCallback(promiseRejectTrampoline);
+}
+
 // IsolateWarmupOldGenerationHeap forces V8 to commit ~target_bytes of
 // old-generation pages by allocating an Array of distinct one-byte
 // strings totaling that size, then dropping the reference and running

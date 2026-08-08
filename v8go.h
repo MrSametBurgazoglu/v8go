@@ -170,6 +170,13 @@ extern void IsolateRemoveNearHeapLimitCallback(IsolatePtr ptr,
                                                size_t heap_limit);
 extern void IsolateAutomaticallyRestoreInitialHeapLimit(IsolatePtr ptr,
                                                          double threshold);
+
+// IsolateSetPromiseRejectCallback registers V8's promise-reject hook on
+// the isolate. The C-side trampoline (v8go.cc) calls the Go entry point
+// goPromiseRejectCallback, which dispatches per-isolate via a Go-side
+// registry. The rejection value handed to Go is only valid for the
+// callback's synchronous duration — callers must not retain the ValuePtr.
+extern void IsolateSetPromiseRejectCallback(IsolatePtr iso);
 // IsolateWarmupOldGenerationHeap forces V8 to commit at least target_bytes
 // of old-generation pages by allocating a non-deduplicated retained buffer
 // inside an internal context, then collecting it. With --no-memory-reducer

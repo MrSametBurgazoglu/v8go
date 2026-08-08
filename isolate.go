@@ -31,6 +31,33 @@ type Isolate struct {
 	undefined *Value
 }
 
+// PromiseRejectEvent mirrors the v8::PromiseRejectEvent enum
+// (deps/include/v8-promise.h). V8 fires one of these each time a
+// promise changes state in a way relevant to rejection handling.
+type PromiseRejectEvent int
+
+const (
+	// PromiseRejectWithNoHandler fires when a promise is rejected
+	// and no .catch/.then(_,_) handler has been attached — i.e. the
+	// rejection is unhandled and would otherwise be invisible.
+	PromiseRejectWithNoHandler PromiseRejectEvent = iota
+	// PromiseHandlerAddedAfterReject fires when a handler is
+	// attached to a promise that was previously rejected with no
+	// handler (the rejection is now "handled").
+	PromiseHandlerAddedAfterReject
+	// PromiseRejectAfterResolved fires when reject() is called on
+	// a promise that was already resolved.
+	PromiseRejectAfterResolved
+	// PromiseResolveAfterResolved fires when resolve() is called on
+	// a promise that was already resolved.
+	PromiseResolveAfterResolved
+)
+
+// promiseRejectCallbacks maps an isolate's C pointer to the Go callback
+// registered via SetPromiseRejectCallback. Keyed by C.IsolatePtr (not
+// *Isolate) because the C trampoline only has the raw pointer.
+var promiseRejectCallbacks sync.Map
+
 // HeapStatistics represents V8 isolate heap statistics
 type HeapStatistics struct {
 	TotalHeapSize            uint64
@@ -202,6 +229,33 @@ func goNearHeapLimitCallback(iso C.IsolatePtr,
 	return current + C.size_t(grow)
 }
 
+// SetPromiseRejectCallback registers a callback that fires whenever V8
+// detects a promise rejection. The most important event is
+// PromiseRejectWithNoHandler — a promise was rejected with no .catch
+// handler, i.e. the rejection would otherwise be silently swallowed.
+//
+// The callback receives the rejection value, which is ONLY valid for
+// the duration of the callback. Read it synchronously (e.g.
+// rejection.String()) and do NOT retain the *Value — the C side frees
+// the wrapper as soon as the callback returns.
+func (i *Isolate) SetPromiseRejectCallback(cb func(event PromiseRejectEvent, rejection *Value)) {
+	if i.ptr == nil {
+		return
+	}
+	promiseRejectCallbacks.Store(i.ptr, cb)
+	C.IsolateSetPromiseRejectCallback(i.ptr)
+}
+
+//export goPromiseRejectCallback
+func goPromiseRejectCallback(iso C.IsolatePtr, event C.int, val C.ValuePtr) {
+	v, ok := promiseRejectCallbacks.Load(iso)
+	if !ok {
+		return
+	}
+	cb := v.(func(PromiseRejectEvent, *Value))
+	cb(PromiseRejectEvent(event), &Value{ptr: val})
+}
+
 // TerminateExecution terminates forcefully the current thread
 // of JavaScript execution in the given isolate.
 func (i *Isolate) TerminateExecution() {
@@ -294,6 +348,7 @@ func (i *Isolate) Dispose() {
 	if i.ptr == nil {
 		return
 	}
+	promiseRejectCallbacks.Delete(i.ptr)
 	C.IsolateDispose(i.ptr)
 	i.ptr = nil
 }

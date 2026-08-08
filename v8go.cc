@@ -29,6 +29,9 @@ struct m_ctx {
   Isolate* iso;
   std::unordered_map<long, m_value*> vals;
   std::vector<m_unboundScript*> unboundScripts;
+  // In-memory registry of ES module source keyed by the specifier string that
+  // JS passes to import(). Consulted by the dynamic-import host hook.
+  std::unordered_map<std::string, std::string> modules;
   Persistent<Context> ptr;
   long nextValId;
 };
@@ -158,12 +161,25 @@ void Init() {
 // NewIsolate and NewIsolateWithOptions: locker / handle scope, capture
 // stack traces, and an internal Context registered as slot 0 data so
 // later cgo entrypoints can recover it via isolateInternalContext.
+//
+// It also registers the dynamic-import and import.meta host hooks. These
+// fire only when JS actually uses import() or import.meta, so registering
+// them unconditionally is free for isolates that never touch modules.
+static MaybeLocal<Promise> hostImportModuleDynamically(
+    Local<Context> context, Local<Data> host_defined_options,
+    Local<Value> resource_name, Local<String> specifier,
+    Local<FixedArray> import_attributes);
+static void hostInitializeImportMeta(Local<Context> context,
+                                     Local<Module> module,
+                                     Local<Object> meta);
 static void finishIsolateInit(Isolate* iso) {
   Locker locker(iso);
   Isolate::Scope isolate_scope(iso);
   HandleScope handle_scope(iso);
 
   iso->SetCaptureStackTraceForUncaughtExceptions(true);
+  iso->SetHostImportModuleDynamicallyCallback(hostImportModuleDynamically);
+  iso->SetHostInitializeImportMetaObjectCallback(hostInitializeImportMeta);
 
   m_ctx* ctx = new m_ctx;
   ctx->ptr.Reset(iso, Context::New(iso));
@@ -319,6 +335,160 @@ void IsolateSetPromiseRejectCallback(IsolatePtr iso) {
   }
   ISOLATE_SCOPE(iso)
   iso->SetPromiseRejectCallback(promiseRejectTrampoline);
+}
+
+/********** Dynamic import() and import.meta host hooks **********/
+
+// recoverModuleContext maps the firing Local<Context> back to its m_ctx via
+// the same ctx_ref slot the FunctionTemplate callback uses (embedder data
+// slot 1). Returns nullptr for contexts v8go did not create.
+static m_ctx* recoverModuleContext(Local<Context> context) {
+  Local<Value> ref_val = context->GetEmbedderData(1);
+  if (ref_val.IsEmpty() || !ref_val->IsInt32()) {
+    return nullptr;
+  }
+  return goContext(ref_val.As<Integer>()->Value());
+}
+
+// compileRegistryModule looks up |specifier| in the context's module registry
+// and returns a freshly-compiled, uninstantiated Module. An empty MaybeLocal
+// means miss or compile failure; for nested static imports V8 turns that into
+// a SyntaxError at instantiation time.
+static MaybeLocal<Module> compileRegistryModule(Local<Context> context,
+                                                Local<String> specifier) {
+  Isolate* iso = Isolate::GetCurrent();
+  m_ctx* ctx = recoverModuleContext(context);
+  if (ctx == nullptr) {
+    return MaybeLocal<Module>();
+  }
+  String::Utf8Value spec_utf8(iso, specifier);
+  const char* spec_cstr = *spec_utf8 ? *spec_utf8 : "";
+  auto it = ctx->modules.find(spec_cstr);
+  if (it == ctx->modules.end()) {
+    return MaybeLocal<Module>();
+  }
+  Local<String> src;
+  if (!String::NewFromUtf8(iso, it->second.c_str(), NewStringType::kNormal)
+           .ToLocal(&src)) {
+    return MaybeLocal<Module>();
+  }
+  // is_module=true is the 9th positional ScriptOrigin argument; CompileModule
+  // requires a module-flagged origin.
+  ScriptOrigin origin(specifier, 0, 0, false, -1, Local<Value>(), false, false,
+                      true);
+  ScriptCompiler::Source sc_source(src, origin);
+  Local<Module> module;
+  if (!ScriptCompiler::CompileModule(iso, &sc_source).ToLocal(&module)) {
+    return MaybeLocal<Module>();
+  }
+  return module;
+}
+
+// resolveModuleCallback satisfies Module::InstantiateModule for nested static
+// imports inside a registered module. V8 drives the recursive instantiation;
+// this callback only hands back a compiled module for each request.
+static MaybeLocal<Module> resolveModuleCallback(
+    Local<Context> context, Local<String> specifier,
+    Local<FixedArray> /*import_attributes*/, Local<Module> /*referrer*/) {
+  return compileRegistryModule(context, specifier);
+}
+
+// hostImportModuleDynamically is the isolate-level host hook fired by
+// `await import(specifier)`. For an in-memory registry the module resolves
+// synchronously: compile -> instantiate -> evaluate -> resolve the returned
+// promise with the module namespace.
+static MaybeLocal<Promise> hostImportModuleDynamically(
+    Local<Context> context, Local<Data> /*host_defined_options*/,
+    Local<Value> /*resource_name*/, Local<String> specifier,
+    Local<FixedArray> /*import_attributes*/) {
+  Isolate* iso = Isolate::GetCurrent();
+  ISOLATE_SCOPE(iso)
+  Context::Scope context_scope(context);
+  TryCatch try_catch(iso);
+
+  Local<Promise::Resolver> resolver;
+  if (!Promise::Resolver::New(context).ToLocal(&resolver)) {
+    return MaybeLocal<Promise>();
+  }
+
+  String::Utf8Value spec_utf8(iso, specifier);
+  const char* spec_cstr = *spec_utf8 ? *spec_utf8 : "";
+  m_ctx* ctx = recoverModuleContext(context);
+  if (ctx == nullptr ||
+      ctx->modules.find(spec_cstr) == ctx->modules.end()) {
+    std::string errmsg = "Cannot find module '";
+    errmsg += spec_cstr;
+    errmsg += "'";
+    Local<String> msg;
+    if (!String::NewFromUtf8(iso, errmsg.c_str(), NewStringType::kNormal)
+             .ToLocal(&msg)) {
+      return MaybeLocal<Promise>();
+    }
+    resolver->Reject(context, Exception::Error(msg)).Check();
+    return resolver->GetPromise();
+  }
+
+  Local<Module> module;
+  if (!compileRegistryModule(context, specifier).ToLocal(&module)) {
+    resolver->Reject(context, try_catch.Exception()).Check();
+    return resolver->GetPromise();
+  }
+
+  if (!module->InstantiateModule(context, resolveModuleCallback)
+           .FromMaybe(false)) {
+    resolver->Reject(context, try_catch.Exception()).Check();
+    return resolver->GetPromise();
+  }
+
+  // Evaluate returns a Promise per spec. A module without top-level await
+  // settles it synchronously; a module-level throw lands in kErrored (not in
+  // try_catch), so the status must be inspected explicitly.
+  if (module->Evaluate(context).IsEmpty()) {
+    resolver->Reject(context, try_catch.Exception()).Check();
+    return resolver->GetPromise();
+  }
+  if (module->GetStatus() == Module::kErrored) {
+    resolver->Reject(context, module->GetException()).Check();
+    return resolver->GetPromise();
+  }
+
+  resolver->Resolve(context, module->GetModuleNamespace()).Check();
+  return resolver->GetPromise();
+}
+
+// hostInitializeImportMeta is fired the first time a module touches
+// import.meta. We populate `url` from the resource_name the module was
+// compiled with (the specifier), matching how browsers set it to the
+// module's resolved URL.
+static void hostInitializeImportMeta(Local<Context> context,
+                                     Local<Module> module,
+                                     Local<Object> meta) {
+  Isolate* iso = Isolate::GetCurrent();
+  ISOLATE_SCOPE(iso)
+  Context::Scope context_scope(context);
+
+  Local<Value> resource = module->GetResourceName();
+  Local<Value> url_val;
+  if (resource.IsEmpty() || resource->IsUndefined()) {
+    url_val = String::NewFromUtf8(iso, "v8go://module", NewStringType::kNormal)
+                  .ToLocalChecked();
+  } else {
+    url_val = resource;
+  }
+  Local<String> url_key;
+  if (!String::NewFromUtf8(iso, "url", NewStringType::kNormal)
+           .ToLocal(&url_key)) {
+    return;
+  }
+  meta->CreateDataProperty(context, url_key, url_val).FromMaybe(false);
+}
+
+// ContextRegisterModule stores ES module source under a specifier string so
+// the dynamic-import host hook can compile it. Registered on the context; the
+// hook recovers the same context via the ctx_ref embedder slot.
+void ContextRegisterModule(ContextPtr ctx, const char* specifier,
+                           const char* source) {
+  ctx->modules[specifier] = source;
 }
 
 // IsolateWarmupOldGenerationHeap forces V8 to commit ~target_bytes of

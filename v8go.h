@@ -241,6 +241,19 @@ extern int ObjectTemplateInternalFieldCount(TemplatePtr ptr);
 extern TemplatePtr NewFunctionTemplate(IsolatePtr iso_ptr, int callback_ref);
 extern RtnValue FunctionTemplateGetFunction(TemplatePtr ptr,
                                             ContextPtr ctx_ptr);
+// Like TemplateSetValue, but targets the FunctionTemplate's prototype so
+// every instance inherits the property.
+extern void FunctionTemplatePrototypeSetValue(TemplatePtr ptr,
+                                              const char* name,
+                                              ValuePtr val,
+                                              int attributes);
+// FunctionTemplatePrototypeSetMethod attaches a child FunctionTemplate (wired
+// to the Go goFunctionCallback dispatch via |callback_ref|) to the prototype of
+// |ptr|. JS `instance.method()` fires the Go callback with the instance as
+// `this`. Returns the child template for further configuration.
+extern TemplatePtr FunctionTemplatePrototypeSetMethod(TemplatePtr ptr,
+                                                      const char* name,
+                                                      int callback_ref);
 
 extern ValuePtr NewValueNull(IsolatePtr iso_ptr);
 extern ValuePtr NewValueUndefined(IsolatePtr iso_ptr);

@@ -795,6 +795,40 @@ RtnValue FunctionTemplateGetFunction(TemplatePtr ptr, ContextPtr ctx) {
   return rtn;
 }
 
+void FunctionTemplatePrototypeSetValue(TemplatePtr ptr,
+                                       const char* name,
+                                       ValuePtr val,
+                                       int attributes) {
+  LOCAL_TEMPLATE(ptr);
+
+  Local<FunctionTemplate> fn_tmpl = tmpl.As<FunctionTemplate>();
+  Local<ObjectTemplate> proto = fn_tmpl->PrototypeTemplate();
+  Local<String> prop_name =
+      String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
+  proto->Set(prop_name, val->ptr.Get(iso), (PropertyAttribute)attributes);
+}
+
+TemplatePtr FunctionTemplatePrototypeSetMethod(TemplatePtr ptr,
+                                               const char* name,
+                                               int callback_ref) {
+  LOCAL_TEMPLATE(ptr);
+
+  Local<FunctionTemplate> parent = tmpl.As<FunctionTemplate>();
+  Local<ObjectTemplate> proto = parent->PrototypeTemplate();
+  Local<String> prop_name =
+      String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
+
+  Local<Integer> cbData = Integer::New(iso, callback_ref);
+  Local<FunctionTemplate> child =
+      FunctionTemplate::New(iso, FunctionTemplateCallback, cbData);
+  proto->Set(prop_name, child);
+
+  m_template* ot = new m_template;
+  ot->iso = iso;
+  ot->ptr = new Persistent<Template>(iso, child);
+  return ot;
+}
+
 /********** Context **********/
 
 #define LOCAL_CONTEXT(ctx)                      \

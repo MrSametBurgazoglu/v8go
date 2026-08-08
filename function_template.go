@@ -81,6 +81,39 @@ func (tmpl *FunctionTemplate) GetFunction(ctx *Context) *Function {
 	return &Function{val}
 }
 
+// PrototypeSet adds a property to the prototype of every instance created
+// from this FunctionTemplate. The value must be a primitive *Value (a number,
+// string, boolean, ...), not a runtime JS object; for method-style callbacks
+// use PrototypeMethod.
+func (tmpl *FunctionTemplate) PrototypeSet(name string, val *Value) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	C.FunctionTemplatePrototypeSetValue(tmpl.ptr, cname, val.ptr, 0)
+	runtime.KeepAlive(tmpl)
+	runtime.KeepAlive(val)
+}
+
+// PrototypeMethod adds a method to the prototype of every instance created
+// from this FunctionTemplate. When JS calls instance.method(), the Go
+// callback cb receives the instance as the receiver (FunctionCallbackInfo.This).
+// Returns the child FunctionTemplate backing the method so the caller can
+// configure it further.
+func (tmpl *FunctionTemplate) PrototypeMethod(name string, cb FunctionCallback) *FunctionTemplate {
+	if cb == nil {
+		panic("nil FunctionCallback argument not supported")
+	}
+	cbref := tmpl.iso.registerCallback(cb)
+
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	child := &template{
+		ptr: C.FunctionTemplatePrototypeSetMethod(tmpl.ptr, cname, C.int(cbref)),
+		iso: tmpl.iso,
+	}
+	runtime.SetFinalizer(child, (*template).finalizer)
+	return &FunctionTemplate{child}
+}
+
 // Note that ideally `thisAndArgs` would be split into two separate arguments, but they were combined
 // to workaround an ERROR_COMMITMENT_LIMIT error on windows that was detected in CI circa 2021.
 // Windows CI was removed shortly after and the workaround has been preserved conservatively. Now

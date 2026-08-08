@@ -11,7 +11,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/robomotionio/v8go"
+	"github.com/MrSametBurgazoglu/v8go"
 )
 
 func TestMain(m *testing.M) {

@@ -7,7 +7,7 @@ package v8go_test
 import (
 	"testing"
 
-	v8 "github.com/robomotionio/v8go"
+	v8 "github.com/MrSametBurgazoglu/v8go"
 )
 
 func TestPromiseFulfilled(t *testing.T) {

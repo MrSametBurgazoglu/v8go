@@ -19,7 +19,7 @@ import (
 	"runtime"
 	"testing"
 
-	v8 "github.com/robomotionio/v8go"
+	v8 "github.com/MrSametBurgazoglu/v8go"
 )
 
 func TestIsOneByteSafe_AcceptsASCII(t *testing.T) {

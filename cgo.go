@@ -24,11 +24,11 @@ import "C"
 // contain V8 libraries and headers which otherwise would be ignored.
 // DO NOT REMOVE
 import (
-	_ "github.com/robomotionio/v8go/deps/darwin_arm64"
-	_ "github.com/robomotionio/v8go/deps/darwin_x86_64"
-	_ "github.com/robomotionio/v8go/deps/include"
-	_ "github.com/robomotionio/v8go/deps/linux_arm64"
-	_ "github.com/robomotionio/v8go/deps/linux_x86_64"
-	_ "github.com/robomotionio/v8go/deps/windows_arm64"
-	_ "github.com/robomotionio/v8go/deps/windows_x86_64"
+	_ "github.com/MrSametBurgazoglu/v8go/deps/darwin_arm64"
+	_ "github.com/MrSametBurgazoglu/v8go/deps/darwin_x86_64"
+	_ "github.com/MrSametBurgazoglu/v8go/deps/include"
+	_ "github.com/MrSametBurgazoglu/v8go/deps/linux_arm64"
+	_ "github.com/MrSametBurgazoglu/v8go/deps/linux_x86_64"
+	_ "github.com/MrSametBurgazoglu/v8go/deps/windows_arm64"
+	_ "github.com/MrSametBurgazoglu/v8go/deps/windows_x86_64"
 )

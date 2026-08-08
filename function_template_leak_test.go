@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"testing"
 
-	v8 "github.com/robomotionio/v8go"
+	v8 "github.com/MrSametBurgazoglu/v8go"
 )
 
 // TestFunctionTemplateReturnValueNotLeaked guards the callback-return-value

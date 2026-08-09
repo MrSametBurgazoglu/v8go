@@ -64,3 +64,53 @@ func TestFunctionTemplateReturnValueNotLeaked(t *testing.T) {
 			"internal context", delta, N)
 	}
 }
+
+// TestFunctionTemplateReturnValueRetained is the other half of the contract
+// above: the drop must only claim values the call itself minted.
+//
+// A callback that returns a handle the Go side still owns is ordinary — a DOM
+// binding hands back the same wrapper object for a node on every access so that
+// `a === a` holds in JS, and `return v8.Null(iso)` returns a per-isolate
+// singleton cached on the *Isolate. An unconditional drop frees both out from
+// under Go: the wrapper's next return builds a different JS object and breaks
+// identity, and the freed null singleton is a use-after-free that takes the
+// process down some calls later.
+func TestFunctionTemplateReturnValueRetained(t *testing.T) {
+	t.Parallel()
+
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+	ctx := v8.NewContext(iso)
+	defer ctx.Close()
+
+	// A wrapper object created once and handed out repeatedly, as a DOM binding
+	// does for a node.
+	tmpl := v8.NewObjectTemplate(iso)
+	wrapper, err := tmpl.NewInstance(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := func(name string, cb v8.FunctionCallback) {
+		if err := ctx.Global().Set(name, v8.NewFunctionTemplate(iso, cb).GetFunction(ctx)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set("wrapper", func(info *v8.FunctionCallbackInfo) *v8.Value { return wrapper.Value })
+	set("nul", func(info *v8.FunctionCallbackInfo) *v8.Value { return v8.Null(iso) })
+
+	for _, tc := range []struct{ src, want string }{
+		{"typeof wrapper()", "object"},
+		{"wrapper() === wrapper()", "true"},
+		// Called repeatedly: a freed singleton reads as garbage, not "null".
+		{"nul(); nul(); String(nul())", "null"},
+		{"nul() === null", "true"},
+	} {
+		val, err := ctx.RunScript(tc.src, "retained.js")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.src, err)
+		}
+		if got := val.String(); got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.src, got, tc.want)
+		}
+	}
+}

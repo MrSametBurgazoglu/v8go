@@ -863,6 +863,11 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
 
   int callback_ref = info.Data().As<Integer>()->Value();
 
+  // Watermark for the return-value release below: any internal-context value
+  // id above this was minted by the callback we are about to run.
+  m_ctx* internal_ctx = isolateInternalContext(iso);
+  long internal_val_watermark = internal_ctx ? internal_ctx->nextValId : 0;
+
   m_value* _this = new m_value;
   _this->id = 0;
   _this->iso = iso;
@@ -889,7 +894,7 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
   if (val != nullptr) {
     info.GetReturnValue().Set(val->ptr.Get(iso));
 
-    // Release the freshly-created return value. Once Set() copies its Local
+    // Release a return value this call created. Once Set() copies its Local
     // into V8's return slot, V8 roots the underlying value for as long as JS
     // needs it; our m_value wrapper (and the strong Global<Value> it holds)
     // is dead weight from here on. Go callbacks build return values with
@@ -902,9 +907,27 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
     // msgbridge) turns that into unbounded, un-GC-able heap growth and a
     // "last resort GC frees 0 bytes" CALL_AND_RETRY_LAST OOM.
     //
-    // Guard: a callback may legitimately return `this` or one of its args,
-    // which are tracked in the *current* (per-call) context and freed at its
-    // Close. Deleting one here would double-free. Skip those by identity.
+    // Only values this call minted may be dropped. A returned value the Go
+    // side still holds a handle to must survive, and there are three kinds:
+    //
+    //   - Null(iso) / Undefined(iso), which are per-isolate singletons cached
+    //     on the Go *Isolate and returned by callbacks constantly. Freeing one
+    //     turns every later Null(iso) into a use-after-free.
+    //   - values tracked in a real Context rather than the internal one —
+    //     ObjectTemplate instances, RunScript results, callback args. Those
+    //     belong to the context and are freed at its Close.
+    //   - anything created before this call and cached on the Go side, such as
+    //     a DOM binding's per-node wrapper object returned on every access.
+    //
+    // The watermark taken before the callback ran separates them: an internal
+    // context id above it can only have come from a NewValue(iso, ...) inside
+    // this call, which is exactly the leak the drop exists to prevent.
+    bool mintedByThisCall = internal_ctx != nullptr && val->ctx == internal_ctx &&
+                            val->id > internal_val_watermark;
+
+    // `this` and the args are context-tracked, so mintedByThisCall already
+    // excludes them; the identity check is belt and braces against a future
+    // change to how they are tracked, where a double-free would be the cost.
     bool aliasesThisOrArg = false;
     for (int i = 0; i <= args_count; i++) {
       if (thisAndArgs[i] == val) {
@@ -912,7 +935,7 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
         break;
       }
     }
-    if (!aliasesThisOrArg) {
+    if (mintedByThisCall && !aliasesThisOrArg) {
       if (val->id != 0 && val->ctx != nullptr) {
         val->ctx->vals.erase(val->id);
       }

@@ -416,7 +416,7 @@ static MaybeLocal<Module> resolveModuleCallback(
 // promise with the module namespace.
 static MaybeLocal<Promise> hostImportModuleDynamically(
     Local<Context> context, Local<Data> /*host_defined_options*/,
-    Local<Value> /*resource_name*/, Local<String> specifier,
+    Local<Value> resource_name, Local<String> specifier,
     Local<FixedArray> /*import_attributes*/) {
   Isolate* iso = Isolate::GetCurrent();
   ISOLATE_SCOPE(iso)
@@ -431,6 +431,16 @@ static MaybeLocal<Promise> hostImportModuleDynamically(
   String::Utf8Value spec_utf8(iso, specifier);
   const char* spec_cstr = *spec_utf8 ? *spec_utf8 : "";
   m_ctx* ctx = recoverModuleContext(context);
+  // A specifier the registry has never seen is offered to the embedder's
+  // resolver before it is called missing: a bundler's runtime composes chunk
+  // URLs as it goes, so the registry cannot be complete in advance. The
+  // resolver fetches and registers, and the second lookup finds it.
+  if (ctx != nullptr && ctx->modules.find(spec_cstr) == ctx->modules.end()) {
+    String::Utf8Value referrer_utf8(iso, resource_name);
+    const char* referrer_cstr = *referrer_utf8 ? *referrer_utf8 : "";
+    goResolveModule(ctx, const_cast<char*>(spec_cstr),
+                    const_cast<char*>(referrer_cstr));
+  }
   if (ctx == nullptr ||
       ctx->modules.find(spec_cstr) == ctx->modules.end()) {
     std::string errmsg = "Cannot find module '";

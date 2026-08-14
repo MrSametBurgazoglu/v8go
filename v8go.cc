@@ -32,6 +32,13 @@ struct m_ctx {
   // In-memory registry of ES module source keyed by the specifier string that
   // JS passes to import(). Consulted by the dynamic-import host hook.
   std::unordered_map<std::string, std::string> modules;
+  // The module map the spec requires: one compiled record per specifier, so a
+  // specifier is instantiated and evaluated exactly once however many times it
+  // is imported. Without it every import() compiled a fresh record and
+  // re-evaluated the module — and a module that imports itself (webpack and
+  // rspack bundles do, to reach their own runtime) re-entered without bound
+  // until the heap was gone.
+  std::unordered_map<std::string, Global<Module>> moduleRecords;
   Persistent<Context> ptr;
   long nextValId;
 };
@@ -363,6 +370,13 @@ static MaybeLocal<Module> compileRegistryModule(Local<Context> context,
   }
   String::Utf8Value spec_utf8(iso, specifier);
   const char* spec_cstr = *spec_utf8 ? *spec_utf8 : "";
+  // The module map first: a specifier already compiled resolves to the same
+  // record, which is what makes a repeated import share one evaluation
+  // instead of starting another.
+  auto cached = ctx->moduleRecords.find(spec_cstr);
+  if (cached != ctx->moduleRecords.end()) {
+    return cached->second.Get(iso);
+  }
   auto it = ctx->modules.find(spec_cstr);
   if (it == ctx->modules.end()) {
     return MaybeLocal<Module>();
@@ -381,6 +395,9 @@ static MaybeLocal<Module> compileRegistryModule(Local<Context> context,
   if (!ScriptCompiler::CompileModule(iso, &sc_source).ToLocal(&module)) {
     return MaybeLocal<Module>();
   }
+  // Recorded before instantiation, so a module that imports itself finds the
+  // record already there rather than compiling a second one.
+  ctx->moduleRecords[spec_cstr].Reset(iso, module);
   return module;
 }
 
@@ -434,22 +451,37 @@ static MaybeLocal<Promise> hostImportModuleDynamically(
     return resolver->GetPromise();
   }
 
-  if (!module->InstantiateModule(context, resolveModuleCallback)
-           .FromMaybe(false)) {
-    resolver->Reject(context, try_catch.Exception()).Check();
+  // A record already past instantiation is not instantiated again, and one
+  // already evaluating or evaluated is not evaluated again — that is the
+  // whole point of the module map, and it is what stops a self-import from
+  // re-entering. An evaluating module (the cycle case) resolves with its
+  // namespace, which is the live binding object the spec hands back.
+  Module::Status status = module->GetStatus();
+  if (status == Module::kErrored) {
+    resolver->Reject(context, module->GetException()).Check();
     return resolver->GetPromise();
+  }
+  if (status == Module::kUninstantiated) {
+    if (!module->InstantiateModule(context, resolveModuleCallback)
+             .FromMaybe(false)) {
+      resolver->Reject(context, try_catch.Exception()).Check();
+      return resolver->GetPromise();
+    }
+    status = module->GetStatus();
   }
 
   // Evaluate returns a Promise per spec. A module without top-level await
   // settles it synchronously; a module-level throw lands in kErrored (not in
   // try_catch), so the status must be inspected explicitly.
-  if (module->Evaluate(context).IsEmpty()) {
-    resolver->Reject(context, try_catch.Exception()).Check();
-    return resolver->GetPromise();
-  }
-  if (module->GetStatus() == Module::kErrored) {
-    resolver->Reject(context, module->GetException()).Check();
-    return resolver->GetPromise();
+  if (status == Module::kInstantiated) {
+    if (module->Evaluate(context).IsEmpty()) {
+      resolver->Reject(context, try_catch.Exception()).Check();
+      return resolver->GetPromise();
+    }
+    if (module->GetStatus() == Module::kErrored) {
+      resolver->Reject(context, module->GetException()).Check();
+      return resolver->GetPromise();
+    }
   }
 
   resolver->Resolve(context, module->GetModuleNamespace()).Check();
@@ -489,6 +521,14 @@ static void hostInitializeImportMeta(Local<Context> context,
 void ContextRegisterModule(ContextPtr ctx, const char* specifier,
                            const char* source) {
   ctx->modules[specifier] = source;
+  // New source under a specifier retires the record compiled from the old
+  // source; otherwise a second document would import the previous page's
+  // module.
+  auto record = ctx->moduleRecords.find(specifier);
+  if (record != ctx->moduleRecords.end()) {
+    record->second.Reset();
+    ctx->moduleRecords.erase(record);
+  }
 }
 
 // IsolateWarmupOldGenerationHeap forces V8 to commit ~target_bytes of
@@ -1091,6 +1131,11 @@ void ContextFree(ContextPtr ctx) {
     us->ptr.Reset();
     delete us;
   }
+
+  for (auto& record : ctx->moduleRecords) {
+    record.second.Reset();
+  }
+  ctx->moduleRecords.clear();
 
   delete ctx;
 }

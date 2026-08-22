@@ -72,6 +72,36 @@ func (o *ObjectTemplate) InternalFieldCount() uint32 {
 	return uint32(C.ObjectTemplateInternalFieldCount(o.ptr))
 }
 
+// MarkAsUndetectable makes instances of this template answer `typeof` with
+// "undefined", test as false in a boolean context, and compare loosely equal to
+// null and undefined — while still being a real object that `===` distinguishes
+// from undefined.
+//
+// This is the [[IsHTMLDDA]] slot the HTML specification carves out for exactly
+// one object, `document.all`, so that the feature sniffs written for a
+// twenty-year-old browser keep answering "no". An embedder implementing that
+// object needs it; nothing else should.
+//
+// V8 requires an undetectable template to also be callable, and enforces it
+// with a CHECK when the first instance is created — so pair this with
+// SetCallAsFunctionHandler, which the one object that needs this wants anyway
+// (`document.all(name)` is the legacy spelling of namedItem).
+func (o *ObjectTemplate) MarkAsUndetectable() {
+	C.ObjectTemplateMarkAsUndetectable(o.ptr)
+	runtime.KeepAlive(o)
+}
+
+// SetCallAsFunctionHandler makes instances of this template callable, running
+// callback for both `obj(…)` and `new obj(…)`.
+func (o *ObjectTemplate) SetCallAsFunctionHandler(callback FunctionCallback) {
+	if callback == nil {
+		panic("nil FunctionCallback argument not supported")
+	}
+	cbref := o.iso.registerCallback(callback)
+	C.ObjectTemplateSetCallAsFunctionHandler(o.ptr, C.int(cbref))
+	runtime.KeepAlive(o)
+}
+
 func (o *ObjectTemplate) apply(opts *contextOptions) {
 	opts.gTmpl = o
 }

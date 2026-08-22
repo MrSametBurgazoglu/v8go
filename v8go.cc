@@ -898,7 +898,29 @@ int ObjectTemplateInternalFieldCount(TemplatePtr ptr) {
   return obj_tmpl->InternalFieldCount();
 }
 
+static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info);
+
+void ObjectTemplateMarkAsUndetectable(TemplatePtr ptr) {
+  LOCAL_TEMPLATE(ptr);
+
+  Local<ObjectTemplate> obj_tmpl = tmpl.As<ObjectTemplate>();
+  obj_tmpl->MarkAsUndetectable();
+}
+
+void ObjectTemplateSetCallAsFunctionHandler(TemplatePtr ptr, int callback_ref) {
+  LOCAL_TEMPLATE(ptr);
+
+  Local<Integer> cbData = Integer::New(iso, callback_ref);
+  Local<ObjectTemplate> obj_tmpl = tmpl.As<ObjectTemplate>();
+  obj_tmpl->SetCallAsFunctionHandler(FunctionTemplateCallback, cbData);
+}
+
 /********** FunctionTemplate **********/
+
+// kNoInternalField must match noInternalField in function_template.go: the
+// value that says "the receiver's internal field 0 is not a 32-bit integer",
+// chosen outside the int32 range so no real field value collides with it.
+static const int64_t kNoInternalField = -(int64_t(1) << 40);
 
 static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
   Isolate* iso = info.GetIsolate();
@@ -939,8 +961,27 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
     args[i] = tracked_value(ctx, val);
   }
 
-  ValuePtr val =
-      goFunctionCallback(ctx_ref, callback_ref, thisAndArgs, args_count);
+  // The receiver's internal field 0, read here rather than fetched back: see
+  // FunctionCallbackInfo.ThisInternalField. Anything that is not a 32-bit
+  // integer — no internal fields at all, an unset field, an embedder storing
+  // something else there — reports the sentinel and the Go side falls back to
+  // the general path.
+  int64_t this_field0 = kNoInternalField;
+  {
+    Local<Object> self = info.This();
+    if (self->InternalFieldCount() > 0) {
+      Local<Data> field = self->GetInternalField(0);
+      if (!field.IsEmpty() && field->IsValue()) {
+        Local<Value> value = field.As<Value>();
+        if (value->IsInt32()) {
+          this_field0 = value.As<Int32>()->Value();
+        }
+      }
+    }
+  }
+
+  ValuePtr val = goFunctionCallback(ctx_ref, callback_ref, thisAndArgs,
+                                    args_count, this_field0);
   if (val != nullptr) {
     info.GetReturnValue().Set(val->ptr.Get(iso));
 

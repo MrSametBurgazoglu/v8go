@@ -15,11 +15,35 @@ import (
 // FunctionCallback is a callback that is executed in Go when a function is executed in JS.
 type FunctionCallback func(info *FunctionCallbackInfo) *Value
 
+// noInternalField is the thisField0 value meaning "the receiver has no
+// internal field 0, or it does not hold a 32-bit integer". It is outside the
+// int32 range every readable field value falls in, so no real field collides
+// with it.
+const noInternalField = int64(-1) << 40
+
 // FunctionCallbackInfo is the argument that is passed to a FunctionCallback.
 type FunctionCallbackInfo struct {
 	ctx  *Context
 	args []*Value
 	this *Object
+	// thisField0 is the receiver's internal field 0, read on the C++ side
+	// while it still had the object. See ThisInternalField.
+	thisField0 int64
+}
+
+// ThisInternalField reports the receiver's internal field 0 when it holds a
+// 32-bit integer, which is the shape an embedder uses to key a native object
+// from its JS wrapper.
+//
+// It costs nothing: the value was read where the call was made, on the C++
+// side, rather than fetched back across cgo. Reading it through
+// This().GetInternalField(0) instead is four crossings and a handle to
+// release, on the busiest path an embedder has.
+func (i *FunctionCallbackInfo) ThisInternalField() (int64, bool) {
+	if i.thisField0 == noInternalField {
+		return 0, false
+	}
+	return i.thisField0, true
 }
 
 // Context is the current context that the callback is being executed in.
@@ -120,15 +144,24 @@ func (tmpl *FunctionTemplate) PrototypeMethod(name string, cb FunctionCallback) 
 // that Windows is supported again it is worth re-testing whether the split form still reproduces
 // the commitment-limit error on modern runners; see follow-up tracked in the v8go Windows restore.
 //
+// thisField0 is the receiver's internal field 0 when it holds a 32-bit
+// integer, and noInternalField otherwise. It rides along because the C++ side
+// is already holding the receiver: an embedder that keys its objects by an id
+// in that field would otherwise pay four cgo crossings per call — the field
+// count, the field, its value, and the handle's release — to learn a number
+// that was one dereference away on the side that made the call.
+//
 //export goFunctionCallback
-func goFunctionCallback(ctxref int, cbref int, thisAndArgs *C.ValuePtr, argsCount int) C.ValuePtr {
+func goFunctionCallback(ctxref int, cbref int, thisAndArgs *C.ValuePtr, argsCount int, thisField0 C.int64_t) C.ValuePtr {
+	XPCount.Add(1)
 	ctx := getContext(ctxref)
 
 	this := *thisAndArgs
 	info := &FunctionCallbackInfo{
-		ctx:  ctx,
-		this: &Object{&Value{ptr: this, ctx: ctx}},
-		args: make([]*Value, argsCount),
+		ctx:        ctx,
+		this:       &Object{&Value{ptr: this, ctx: ctx}},
+		args:       make([]*Value, argsCount),
+		thisField0: int64(thisField0),
 	}
 
 	argv := (*[1 << 30]C.ValuePtr)(unsafe.Pointer(thisAndArgs))[1 : argsCount+1 : argsCount+1]

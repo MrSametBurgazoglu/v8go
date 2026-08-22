@@ -245,6 +245,9 @@ extern RtnValue ObjectTemplateNewInstance(TemplatePtr ptr, ContextPtr ctx_ptr);
 extern void ObjectTemplateSetInternalFieldCount(TemplatePtr ptr,
                                                 int field_count);
 extern int ObjectTemplateInternalFieldCount(TemplatePtr ptr);
+extern void ObjectTemplateMarkAsUndetectable(TemplatePtr ptr);
+extern void ObjectTemplateSetCallAsFunctionHandler(TemplatePtr ptr,
+                                                   int callback_ref);
 
 extern TemplatePtr NewFunctionTemplate(IsolatePtr iso_ptr, int callback_ref);
 extern RtnValue FunctionTemplateGetFunction(TemplatePtr ptr,

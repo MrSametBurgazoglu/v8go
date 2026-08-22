@@ -153,7 +153,6 @@ func (tmpl *FunctionTemplate) PrototypeMethod(name string, cb FunctionCallback) 
 //
 //export goFunctionCallback
 func goFunctionCallback(ctxref int, cbref int, thisAndArgs *C.ValuePtr, argsCount int, thisField0 C.int64_t) C.ValuePtr {
-	XPCount.Add(1)
 	ctx := getContext(ctxref)
 
 	this := *thisAndArgs

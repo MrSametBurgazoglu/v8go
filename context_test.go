@@ -208,3 +208,50 @@ func ExampleContext_globalTemplate() {
 	// Output:
 	// v1.0.0
 }
+
+// Two contexts on one isolate are fenced from each other by V8 unless they
+// carry the same security token: the access check fires on any cross-context
+// property read through a global proxy. That default is what an embedder wants
+// between cross-origin documents, and what it must undo for same-origin ones —
+// a same-origin iframe reaching `parent.document`, say.
+func TestContextSecurityToken(t *testing.T) {
+	t.Parallel()
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+
+	parent := v8.NewContext(iso)
+	defer parent.Close()
+	child := v8.NewContext(iso)
+	defer child.Close()
+
+	if _, err := child.RunScript(`globalThis.secret = 'inside'`, "child.js"); err != nil {
+		t.Fatalf("child setup: %v", err)
+	}
+	childGlobal := child.Global()
+	if err := parent.Global().Set("child", childGlobal); err != nil {
+		t.Fatalf("handing the child global over: %v", err)
+	}
+
+	// Fenced by default: reading through the other context's global proxy is
+	// refused, and the refusal is an exception rather than undefined.
+	if _, err := parent.RunScript(`child.secret`, "read.js"); err == nil {
+		t.Error("a read across two contexts with different security tokens was allowed")
+	}
+
+	// Same token, same origin.
+	token := parent.SecurityToken()
+	child.SetSecurityToken(token)
+	val, err := parent.RunScript(`child.secret`, "read2.js")
+	if err != nil {
+		t.Fatalf("after sharing a token the read still failed: %v", err)
+	}
+	if val.String() != "inside" {
+		t.Errorf("read %q across the boundary, want %q", val.String(), "inside")
+	}
+
+	// And back to the default, which is a token unique to that context again.
+	child.SetSecurityToken(nil)
+	if _, err := parent.RunScript(`child.secret`, "read3.js"); err == nil {
+		t.Error("the read was still allowed after the default token was restored")
+	}
+}

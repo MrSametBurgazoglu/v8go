@@ -113,6 +113,31 @@ func (c *Context) Global() *Object {
 	return &Object{v}
 }
 
+// SecurityToken is the value V8 compares when script in one context reaches
+// into an object belonging to another. Contexts with tokens that are not the
+// same object cannot read each other's globals: the access check fires and the
+// read throws. That is what a browser wants between cross-origin documents.
+//
+// The handle is owned by the caller.
+func (c *Context) SecurityToken() *Value {
+	valPtr := C.ContextSecurityToken(c.ptr)
+	return &Value{valPtr, c}
+}
+
+// SetSecurityToken makes this context share token's identity, so that a context
+// holding the same token may reach into this one's objects — the same-origin
+// relationship two documents of one site have, and what an embedder needs for a
+// same-origin iframe. A nil token restores V8's default, which is a token
+// unique to this context and so reachable from no other.
+func (c *Context) SetSecurityToken(token *Value) {
+	var ptr C.ValuePtr
+	if token != nil {
+		ptr = token.ptr
+	}
+	C.ContextSetSecurityToken(c.ptr, ptr)
+	runtime.KeepAlive(token)
+}
+
 // PerformMicrotaskCheckpoint runs the default MicrotaskQueue until empty.
 // This is used to make progress on Promises.
 func (c *Context) PerformMicrotaskCheckpoint() {

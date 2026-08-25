@@ -1346,6 +1346,33 @@ void ValueRelease(ValuePtr ptr) {
   delete ptr;
 }
 
+// Two contexts may reach into each other's objects exactly when they carry the
+// same security token. Without one, V8's default access check fires on any
+// cross-context property access through a global proxy and the read throws "no
+// access" — which is what a browser wants for a cross-origin frame, and exactly
+// what it must not do for a same-origin one.
+//
+// The token is any value; identity is what is compared. An embedder that wants
+// two contexts same-origin reads one's token and sets it on the other.
+void ContextSetSecurityToken(ContextPtr ctx, ValuePtr token_ptr) {
+  LOCAL_CONTEXT(ctx);
+  if (token_ptr == nullptr) {
+    local_ctx->UseDefaultSecurityToken();
+    return;
+  }
+  local_ctx->SetSecurityToken(token_ptr->ptr.Get(iso));
+}
+
+ValuePtr ContextSecurityToken(ContextPtr ctx) {
+  LOCAL_CONTEXT(ctx);
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, local_ctx->GetSecurityToken());
+  return tracked_value(ctx, val);
+}
+
 ValuePtr ContextGlobal(ContextPtr ctx) {
   LOCAL_CONTEXT(ctx);
   m_value* val = new m_value;

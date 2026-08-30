@@ -418,6 +418,8 @@ extern InspectorSessionPtr InspectorConnect(InspectorPtr insp, uintptr_t ref);
 extern void InspectorSessionDispatch(InspectorSessionPtr session,
                                      const char* message, int length);
 extern void InspectorSessionDispose(InspectorSessionPtr session);
+// PumpPlatformTasks drains the platform foreground task queue for iso.
+extern void PumpPlatformTasks(IsolatePtr iso);
 
 #ifdef __cplusplus
 }  // extern "C"

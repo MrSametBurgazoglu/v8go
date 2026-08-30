@@ -2644,6 +2644,18 @@ InspectorSessionPtr InspectorConnect(InspectorPtr insp, uintptr_t ref) {
   return s;
 }
 
+// PumpPlatformTasks runs the platform's queued foreground tasks for the
+// isolate until there are none. Modern V8 defers several inspector commands
+// through here — HeapProfiler.takeHeapSnapshot posts the snapshot as a task
+// and answers only when it has run — and an embedder that never pumps sees
+// those commands simply vanish: the enable round-trips, the snapshot never
+// answers and never sends a chunk.
+void PumpPlatformTasks(IsolatePtr iso) {
+  ISOLATE_SCOPE(iso);
+  while (platform::PumpMessageLoop(default_platform.get(), iso)) {
+  }
+}
+
 void InspectorSessionDispatch(InspectorSessionPtr s, const char* message,
                               int length) {
   Isolate* iso = s->inspector->iso;
@@ -2651,6 +2663,12 @@ void InspectorSessionDispatch(InspectorSessionPtr s, const char* message,
   std::vector<uint16_t> wide = utf8ToUtf16(message, length);
   s->session->dispatchProtocolMessage(
       v8_inspector::StringView(wide.data(), wide.size()));
+  // Some commands answer through a platform task rather than synchronously -
+  // HeapProfiler.takeHeapSnapshot posts the snapshot and responds only when
+  // it has run. Nothing else in this embedder pumps the platform, so the
+  // dispatch drains it before returning: the reply and its chunks arrive
+  // through the channel like any synchronous answer.
+  PumpPlatformTasks(iso);
 }
 
 void InspectorSessionDispose(InspectorSessionPtr s) {

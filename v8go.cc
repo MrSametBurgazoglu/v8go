@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "_cgo_export.h"
+#include "v8-inspector.h"
 
 using namespace v8;
 
@@ -2414,3 +2415,251 @@ size_t BackingStoreByteLength(BackingStorePtr ptr) {
   return ptr->backing_store->ByteLength();
 }
 }
+
+// ---------------------------------------------------------------------------
+// v8-inspector
+//
+// The inspector is compiled into libv8 already; what was missing was any way
+// to reach it from Go. The shape follows the rest of this file: an opaque
+// struct per object, a uintptr ref back into Go for callbacks, UTF-8 at the
+// boundary in both directions.
+//
+// The one genuinely tricky piece is pausing. When the debugger hits a
+// breakpoint, V8 does not return: it calls the client's runMessageLoopOnPause
+// and expects the embedder to keep feeding it protocol messages ON THE SAME
+// THREAD until one of them resumes execution. So the loop here calls back
+// into Go once per tick, Go blocks on its message queue, dispatches whatever
+// arrives back into the session (re-entrantly - that is the designed use),
+// and quitMessageLoopOnPause flips the flag the loop is standing on.
+
+namespace {
+
+// viewToUtf8 converts a StringView's contents to UTF-8, whichever width the
+// buffer is. An 8-bit view is Latin-1 by V8's convention, not UTF-8, so its
+// high half encodes to two bytes.
+std::string viewToUtf8(const v8_inspector::StringView& view) {
+  std::string out;
+  if (view.is8Bit()) {
+    const uint8_t* chars = view.characters8();
+    out.reserve(view.length());
+    for (size_t i = 0; i < view.length(); i++) {
+      uint8_t c = chars[i];
+      if (c < 0x80) {
+        out.push_back(static_cast<char>(c));
+      } else {
+        out.push_back(static_cast<char>(0xC0 | (c >> 6)));
+        out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+      }
+    }
+    return out;
+  }
+  const uint16_t* chars = view.characters16();
+  out.reserve(view.length());
+  for (size_t i = 0; i < view.length(); i++) {
+    uint32_t code = chars[i];
+    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < view.length() &&
+        chars[i + 1] >= 0xDC00 && chars[i + 1] <= 0xDFFF) {
+      code = 0x10000 + ((code - 0xD800) << 10) + (chars[i + 1] - 0xDC00);
+      i++;
+    }
+    if (code < 0x80) {
+      out.push_back(static_cast<char>(code));
+    } else if (code < 0x800) {
+      out.push_back(static_cast<char>(0xC0 | (code >> 6)));
+      out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+    } else if (code < 0x10000) {
+      out.push_back(static_cast<char>(0xE0 | (code >> 12)));
+      out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+    } else {
+      out.push_back(static_cast<char>(0xF0 | (code >> 18)));
+      out.push_back(static_cast<char>(0x80 | ((code >> 12) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+    }
+  }
+  return out;
+}
+
+// utf8ToUtf16 is the other direction: the frontend's JSON arrives from Go as
+// UTF-8 and the session wants a StringView, whose 8-bit flavour is Latin-1 -
+// so anything beyond ASCII must go through the 16-bit one.
+std::vector<uint16_t> utf8ToUtf16(const char* data, int length) {
+  std::vector<uint16_t> out;
+  out.reserve(length);
+  for (int i = 0; i < length;) {
+    uint8_t c = static_cast<uint8_t>(data[i]);
+    uint32_t code = 0xFFFD;
+    int size = 1;
+    if (c < 0x80) {
+      code = c;
+    } else if ((c & 0xE0) == 0xC0 && i + 1 < length) {
+      code = ((c & 0x1F) << 6) | (data[i + 1] & 0x3F);
+      size = 2;
+    } else if ((c & 0xF0) == 0xE0 && i + 2 < length) {
+      code = ((c & 0x0F) << 12) | ((data[i + 1] & 0x3F) << 6) |
+             (data[i + 2] & 0x3F);
+      size = 3;
+    } else if ((c & 0xF8) == 0xF0 && i + 3 < length) {
+      code = ((c & 0x07) << 18) | ((data[i + 1] & 0x3F) << 12) |
+             ((data[i + 2] & 0x3F) << 6) | (data[i + 3] & 0x3F);
+      size = 4;
+    }
+    if (code >= 0x10000) {
+      code -= 0x10000;
+      out.push_back(static_cast<uint16_t>(0xD800 + (code >> 10)));
+      out.push_back(static_cast<uint16_t>(0xDC00 + (code & 0x3FF)));
+    } else {
+      out.push_back(static_cast<uint16_t>(code));
+    }
+    i += size;
+  }
+  return out;
+}
+
+class InspectorGoClient;
+
+}  // namespace
+
+// m_inspector owns the V8Inspector and the client V8 calls back into. One per
+// isolate is the arrangement; the context group id is fixed at 1 because a
+// group is a frame tree and this embedder gives each context its own session.
+struct m_inspector {
+  Isolate* iso;
+  uintptr_t ref;  // the Go handle callbacks identify themselves with
+  std::unique_ptr<v8_inspector::V8InspectorClient> client;
+  std::unique_ptr<v8_inspector::V8Inspector> inspector;
+  bool paused = false;
+};
+
+namespace {
+
+class InspectorGoClient : public v8_inspector::V8InspectorClient {
+ public:
+  explicit InspectorGoClient(m_inspector* owner) : owner_(owner) {}
+
+  void runMessageLoopOnPause(int) override {
+    owner_->paused = true;
+    while (owner_->paused) {
+      // Go blocks until the frontend sends something, dispatches it into the
+      // session (on this thread, which is the rule), and returns. A resume or
+      // step lands in quitMessageLoopOnPause below before the next tick.
+      if (!goInspectorPauseTick(owner_->ref)) {
+        break;  // the Go side is shutting the session down
+      }
+    }
+    owner_->paused = false;
+  }
+
+  void quitMessageLoopOnPause() override { owner_->paused = false; }
+
+  Local<Context> ensureDefaultContextInGroup(int) override {
+    m_ctx* ctx = isolateInternalContext(owner_->iso);
+    if (ctx == nullptr) {
+      return Local<Context>();
+    }
+    return ctx->ptr.Get(owner_->iso);
+  }
+
+ private:
+  m_inspector* owner_;
+};
+
+class InspectorGoChannel : public v8_inspector::V8Inspector::Channel {
+ public:
+  explicit InspectorGoChannel(uintptr_t ref) : ref_(ref) {}
+
+  void sendResponse(
+      int callId, std::unique_ptr<v8_inspector::StringBuffer> message) override {
+    forward(callId, std::move(message));
+  }
+  void sendNotification(
+      std::unique_ptr<v8_inspector::StringBuffer> message) override {
+    forward(-1, std::move(message));
+  }
+  void flushProtocolNotifications() override {}
+
+ private:
+  void forward(int callId,
+               std::unique_ptr<v8_inspector::StringBuffer> message) {
+    std::string utf8 = viewToUtf8(message->string());
+    goInspectorMessage(ref_, callId, const_cast<char*>(utf8.data()),
+                       static_cast<int>(utf8.size()));
+  }
+  uintptr_t ref_;
+};
+
+}  // namespace
+
+// m_inspectorSession is one protocol connection: the channel Go messages leave
+// through and the session they arrive into.
+struct m_inspectorSession {
+  m_inspector* inspector;
+  std::unique_ptr<InspectorGoChannel> channel;
+  std::unique_ptr<v8_inspector::V8InspectorSession> session;
+};
+
+extern "C" {
+
+InspectorPtr NewInspector(IsolatePtr iso, uintptr_t ref) {
+  ISOLATE_SCOPE(iso);
+  m_inspector* insp = new m_inspector;
+  insp->iso = iso;
+  insp->ref = ref;
+  insp->client = std::make_unique<InspectorGoClient>(insp);
+  insp->inspector = v8_inspector::V8Inspector::create(iso, insp->client.get());
+  return insp;
+}
+
+void InspectorContextCreated(InspectorPtr insp, ContextPtr ctx) {
+  ISOLATE_SCOPE(insp->iso);
+  Local<Context> local = ctx->ptr.Get(insp->iso);
+  v8_inspector::StringView name(reinterpret_cast<const uint8_t*>("page"), 4);
+  insp->inspector->contextCreated(v8_inspector::V8ContextInfo(local, 1, name));
+}
+
+void InspectorContextDestroyed(InspectorPtr insp, ContextPtr ctx) {
+  ISOLATE_SCOPE(insp->iso);
+  insp->inspector->contextDestroyed(ctx->ptr.Get(insp->iso));
+}
+
+void InspectorDispose(InspectorPtr insp) {
+  {
+    ISOLATE_SCOPE(insp->iso);
+    insp->inspector.reset();
+    insp->client.reset();
+  }
+  delete insp;
+}
+
+InspectorSessionPtr InspectorConnect(InspectorPtr insp, uintptr_t ref) {
+  ISOLATE_SCOPE(insp->iso);
+  m_inspectorSession* s = new m_inspectorSession;
+  s->inspector = insp;
+  s->channel = std::make_unique<InspectorGoChannel>(ref);
+  s->session = insp->inspector->connect(
+      1, s->channel.get(), v8_inspector::StringView(),
+      v8_inspector::V8Inspector::kFullyTrusted,
+      v8_inspector::V8Inspector::kNotWaitingForDebugger);
+  return s;
+}
+
+void InspectorSessionDispatch(InspectorSessionPtr s, const char* message,
+                              int length) {
+  Isolate* iso = s->inspector->iso;
+  ISOLATE_SCOPE(iso);
+  std::vector<uint16_t> wide = utf8ToUtf16(message, length);
+  s->session->dispatchProtocolMessage(
+      v8_inspector::StringView(wide.data(), wide.size()));
+}
+
+void InspectorSessionDispose(InspectorSessionPtr s) {
+  {
+    ISOLATE_SCOPE(s->inspector->iso);
+    s->session.reset();
+    s->channel.reset();
+  }
+  delete s;
+}
+
+}  // extern "C"

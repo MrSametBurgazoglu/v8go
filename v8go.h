@@ -51,11 +51,15 @@ typedef struct m_ctx m_ctx;
 typedef struct m_value m_value;
 typedef struct m_template m_template;
 typedef struct m_unboundScript m_unboundScript;
+typedef struct m_inspector m_inspector;
+typedef struct m_inspectorSession m_inspectorSession;
 
 typedef m_ctx* ContextPtr;
 typedef m_value* ValuePtr;
 typedef m_template* TemplatePtr;
 typedef m_unboundScript* UnboundScriptPtr;
+typedef m_inspector* InspectorPtr;
+typedef m_inspectorSession* InspectorSessionPtr;
 
 typedef struct {
   const char* msg;
@@ -402,6 +406,18 @@ extern size_t BackingStoreByteLength(BackingStorePtr ptr);
 // V8-owned storage from |data| (|length| bytes). The caller's buffer may be
 // freed immediately after the call returns.
 extern ValuePtr NewArrayBuffer(IsolatePtr iso_ptr, void* data, int length);
+
+// v8-inspector: one inspector per isolate, sessions per protocol connection.
+// ref is a Go handle the callbacks (goInspectorMessage, goInspectorPauseTick)
+// identify themselves with. Messages are UTF-8 in both directions.
+extern InspectorPtr NewInspector(IsolatePtr iso, uintptr_t ref);
+extern void InspectorContextCreated(InspectorPtr insp, ContextPtr ctx);
+extern void InspectorContextDestroyed(InspectorPtr insp, ContextPtr ctx);
+extern void InspectorDispose(InspectorPtr insp);
+extern InspectorSessionPtr InspectorConnect(InspectorPtr insp, uintptr_t ref);
+extern void InspectorSessionDispatch(InspectorSessionPtr session,
+                                     const char* message, int length);
+extern void InspectorSessionDispose(InspectorSessionPtr session);
 
 #ifdef __cplusplus
 }  // extern "C"

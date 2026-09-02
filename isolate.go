@@ -423,3 +423,16 @@ func (i *Isolate) getCallback(ref int) FunctionCallback {
 	defer i.cbMutex.RUnlock()
 	return i.cbs[ref]
 }
+
+// PumpMessageLoop runs one foreground task V8's platform holds for this
+// isolate — the result of an asynchronous WebAssembly compile, for one — and
+// reports whether there was one. V8 never runs these by itself; an event
+// loop that does not pump sees every async compile stay pending. Call it
+// where the loop performs its microtask checkpoint, until it answers false.
+func (i *Isolate) PumpMessageLoop() bool {
+	if i.ptr == nil {
+		return false
+	}
+	return C.IsolatePumpMessageLoop(i.ptr) != 0
+}
+

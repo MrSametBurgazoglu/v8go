@@ -2326,6 +2326,20 @@ void SetFlags(const char* flags) {
   V8::SetFlagsFromString(flags);
 }
 
+// Runs one foreground task the platform holds for this isolate, if any:
+// what V8's own background work — asynchronous WebAssembly compilation,
+// streaming, GC finalisation callbacks — posts back to the isolate's thread.
+// Nothing in V8 runs these on its own; an embedder that never pumps sees
+// WebAssembly.instantiate's promise stay pending forever. Returns 1 when a
+// task ran, so the caller can loop until the queue is empty.
+int IsolatePumpMessageLoop(IsolatePtr iso) {
+  ISOLATE_SCOPE(iso);
+  return platform::PumpMessageLoop(default_platform.get(), iso,
+                                   platform::MessageLoopBehavior::kDoNotWait)
+             ? 1
+             : 0;
+}
+
 /********** SharedArrayBuffer & BackingStore ***********/
 
 struct v8BackingStore {

@@ -393,6 +393,10 @@ ValuePtr FunctionSourceMapUrl(ValuePtr ptr);
 const char* Version();
 extern void SetFlags(const char* flags);
 extern int IsolatePumpMessageLoop(IsolatePtr iso);
+extern void IsolateLowMemoryNotification(IsolatePtr iso);
+extern void IsolateClearKeptObjects(IsolatePtr iso);
+extern void ValueSetWeak(ValuePtr ptr);
+extern void ValueClearWeak(ValuePtr ptr);
 
 extern BackingStorePtr SharedArrayBufferGetBackingStore(ValuePtr ptr);
 extern BackingStorePtr ArrayBufferGetBackingStore(ValuePtr ptr);

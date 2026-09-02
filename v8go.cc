@@ -2421,6 +2421,56 @@ ValuePtr NewSharedArrayBufferFromBackingStore(ContextPtr ctx, BackingStorePtr st
   return tracked_value(ctx, val);
 }
 
+/********** Weak handles **********/
+
+// A weak m_value: V8 may collect the object once nothing in JS reaches it,
+// and when it does the first-pass weak callback resets the Global (which V8
+// requires of it) and tells Go, by the m_value's address, so the embedder
+// can drop its own bookkeeping and free the m_value. The callback runs on
+// the isolate's thread inside the collection, so the Go side must not
+// allocate V8 handles there; releasing the m_value (ValueRelease: an erase
+// and a delete on an already-reset Global) is fine.
+static void weakValueCallback(const WeakCallbackInfo<m_value>& info) {
+  m_value* val = info.GetParameter();
+  if (val == nullptr) {
+    return;
+  }
+  val->ptr.Reset();
+  goWeakCallback(static_cast<void*>(val));
+}
+
+void ValueSetWeak(ValuePtr ptr) {
+  if (ptr == nullptr || ptr->ptr.IsEmpty()) {
+    return;
+  }
+  ptr->ptr.SetWeak(ptr, weakValueCallback, WeakCallbackType::kParameter);
+}
+
+void ValueClearWeak(ValuePtr ptr) {
+  if (ptr == nullptr || ptr->ptr.IsEmpty()) {
+    return;
+  }
+  ptr->ptr.ClearWeak();
+}
+
+// A full garbage collection now (Mark-Compact), the way V8 answers a
+// low-memory signal. What a test that asserts collection needs, without the
+// --expose-gc flag and its `gc` global.
+void IsolateLowMemoryNotification(IsolatePtr iso) {
+  ISOLATE_SCOPE(iso);
+  iso->LowMemoryNotification();
+}
+
+// WeakRef.deref() keeps its target alive until the end of the current job;
+// the embedder marks that end by calling this, after each microtask
+// checkpoint. An embedder that never does keeps every deref'd object alive
+// for the life of the isolate, and a WeakRef is then a strong reference
+// with extra steps.
+void IsolateClearKeptObjects(IsolatePtr iso) {
+  ISOLATE_SCOPE(iso);
+  iso->ClearKeptObjects();
+}
+
 void BackingStoreRelease(BackingStorePtr ptr) {
   if (ptr == nullptr) {
     return;

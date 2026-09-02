@@ -435,3 +435,26 @@ func (i *Isolate) PumpMessageLoop() bool {
 	}
 	return C.IsolatePumpMessageLoop(i.ptr) != 0
 }
+
+// LowMemoryNotification asks V8 for a full garbage collection now — a
+// Mark-Compact, the answer to a low-memory signal. It is what a test that
+// asserts something was collected needs, without --expose-gc and its `gc`
+// global; it is also the right call when the embedder knows memory is
+// short.
+func (i *Isolate) LowMemoryNotification() {
+	if i.ptr == nil {
+		return
+	}
+	C.IsolateLowMemoryNotification(i.ptr)
+}
+
+// ClearKeptObjects ends the current job for WeakRef purposes: a target
+// deref'd during the job may be collected after this. Call it after each
+// microtask checkpoint, as the ECMAScript host hooks require; without it a
+// WeakRef never lets go.
+func (i *Isolate) ClearKeptObjects() {
+	if i.ptr == nil {
+		return
+	}
+	C.IsolateClearKeptObjects(i.ptr)
+}

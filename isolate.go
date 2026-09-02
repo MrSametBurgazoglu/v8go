@@ -222,6 +222,17 @@ var errIsolateWarmupFailed = errors.New(
 //export goNearHeapLimitCallback
 func goNearHeapLimitCallback(iso C.IsolatePtr,
 	current, initial C.size_t) C.size_t {
+	if entry, ok := heapLimitPolicies.Load(iso); ok {
+		policy := entry.(*heapLimitPolicy)
+		if policy.growths < policy.maxGrowths {
+			policy.growths++
+			return current + C.size_t(policy.growth)
+		}
+		if policy.onExceeded != nil {
+			policy.onExceeded()
+		}
+		return current + C.size_t(heapLimitHeadroomBytes)
+	}
 	grow := atomic.LoadUint64(&nearHeapLimitGrowthBytes)
 	if grow == 0 {
 		return current
@@ -458,3 +469,46 @@ func (i *Isolate) ClearKeptObjects() {
 	}
 	C.IsolateClearKeptObjects(i.ptr)
 }
+
+// Heap-limit policy, per isolate.
+//
+// The default near-heap-limit callback grows the cap by a process-wide
+// amount every time V8 asks, without end: a page that leaks is granted
+// memory until the OS refuses, and the refusal is a process abort. A policy
+// grants a fixed number of growths and then calls onExceeded, which is the
+// embedder's chance to terminate the isolate's execution (safe from inside
+// the callback) and mark the page dead; the callback then returns a little
+// headroom so the allocation in flight completes and execution reaches the
+// termination check, instead of V8 reporting a fatal out-of-memory and
+// taking the process down.
+type heapLimitPolicy struct {
+	growth     uint64
+	maxGrowths int
+	growths    int
+	onExceeded func()
+}
+
+var heapLimitPolicies sync.Map // C.IsolatePtr → *heapLimitPolicy
+
+// SetHeapLimitPolicy installs the policy: up to maxGrowths growths of
+// growthBytes each, then onExceeded. Arms the near-heap-limit callback.
+func (i *Isolate) SetHeapLimitPolicy(growthBytes uint64, maxGrowths int, onExceeded func()) {
+	if i.ptr == nil {
+		return
+	}
+	heapLimitPolicies.Store(i.ptr, &heapLimitPolicy{growth: growthBytes, maxGrowths: maxGrowths, onExceeded: onExceeded})
+	C.IsolateAddNearHeapLimitCallback(i.ptr)
+}
+
+// RemoveHeapLimitPolicy forgets the policy; call it before Dispose, or the
+// entry outlives the isolate under an address V8 may reuse.
+func (i *Isolate) RemoveHeapLimitPolicy() {
+	if i.ptr == nil {
+		return
+	}
+	heapLimitPolicies.Delete(i.ptr)
+}
+
+// heapLimitHeadroomBytes is what an exhausted policy still grants, so the
+// allocation that tripped the limit completes and the termination lands.
+const heapLimitHeadroomBytes = 32 * 1024 * 1024

@@ -2406,6 +2406,21 @@ ValuePtr NewArrayBuffer(IsolatePtr iso, void* data, int length) {
   return tracked_value(ctx, val);
 }
 
+// A SharedArrayBuffer in ctx's isolate over a backing store taken from
+// another isolate's buffer: the two then address the same bytes, which is
+// what posting shared memory to a worker means. The store's shared_ptr is
+// copied, so the caller may release its proxy afterwards.
+ValuePtr NewSharedArrayBufferFromBackingStore(ContextPtr ctx, BackingStorePtr store) {
+  LOCAL_CONTEXT(ctx);
+  Local<SharedArrayBuffer> buffer = SharedArrayBuffer::New(iso, store->backing_store);
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, buffer);
+  return tracked_value(ctx, val);
+}
+
 void BackingStoreRelease(BackingStorePtr ptr) {
   if (ptr == nullptr) {
     return;

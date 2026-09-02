@@ -435,4 +435,3 @@ func (i *Isolate) PumpMessageLoop() bool {
 	}
 	return C.IsolatePumpMessageLoop(i.ptr) != 0
 }
-

@@ -397,6 +397,7 @@ extern int IsolatePumpMessageLoop(IsolatePtr iso);
 extern BackingStorePtr SharedArrayBufferGetBackingStore(ValuePtr ptr);
 extern BackingStorePtr ArrayBufferGetBackingStore(ValuePtr ptr);
 extern BackingStorePtr TypedArrayGetBuffer(ValuePtr ptr);
+extern ValuePtr NewSharedArrayBufferFromBackingStore(ContextPtr ctx, BackingStorePtr store);
 extern size_t TypedArrayByteOffset(ValuePtr ptr);
 extern size_t TypedArrayByteLength(ValuePtr ptr);
 extern void BackingStoreRelease(BackingStorePtr ptr);

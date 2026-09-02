@@ -769,3 +769,51 @@ func goReleaseExternalString(pinID C.uint64_t) {
 	delete(extPins, uint64(pinID))
 	extPinLock.Unlock()
 }
+
+// BackingStore is a held reference to a SharedArrayBuffer's memory,
+// independent of any isolate: it keeps the bytes alive until Release, and a
+// SharedArrayBuffer in another isolate can be built over it
+// (NewSharedArrayBufferFromBackingStore). That pair is how shared memory is
+// posted between a page and its worker.
+type BackingStore struct {
+	ptr C.BackingStorePtr
+}
+
+// SharedArrayBufferBackingStore is the backing store of a SharedArrayBuffer
+// value. The caller owns the returned reference and must Release it once a
+// buffer over it exists in the destination isolate (or the transfer is
+// abandoned).
+func (v *Value) SharedArrayBufferBackingStore() (*BackingStore, error) {
+	if !v.IsSharedArrayBuffer() {
+		return nil, errors.New("v8go: value is not a SharedArrayBuffer")
+	}
+	return &BackingStore{ptr: C.SharedArrayBufferGetBackingStore(v.ptr)}, nil
+}
+
+// ByteLength is the store's size in bytes.
+func (b *BackingStore) ByteLength() int {
+	if b == nil || b.ptr == nil {
+		return 0
+	}
+	return int(C.BackingStoreByteLength(b.ptr))
+}
+
+// Release drops this reference. The memory lives on while any
+// SharedArrayBuffer over it does.
+func (b *BackingStore) Release() {
+	if b == nil || b.ptr == nil {
+		return
+	}
+	C.BackingStoreRelease(b.ptr)
+	b.ptr = nil
+}
+
+// NewSharedArrayBufferFromBackingStore creates a SharedArrayBuffer in ctx over
+// an existing backing store, sharing its bytes with every other buffer over
+// the same store, in any isolate.
+func NewSharedArrayBufferFromBackingStore(ctx *Context, store *BackingStore) *Value {
+	if ctx == nil || store == nil || store.ptr == nil {
+		return nil
+	}
+	return &Value{ptr: C.NewSharedArrayBufferFromBackingStore(ctx.ptr, store.ptr), ctx: ctx}
+}

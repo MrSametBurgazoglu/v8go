@@ -253,6 +253,16 @@ func (v *Value) Uint32() uint32 {
 	return uint32(C.ValueToUint32(v.ptr))
 }
 
+// IdentityHash is V8's per-object identity hash: equal for the same object
+// across calls, and 0 for a value that is not an object. It lets a registry
+// filter candidates before paying for SameValue on each.
+func (v *Value) IdentityHash() int {
+	if v == nil || v.ptr == nil {
+		return 0
+	}
+	return int(C.ValueIdentityHash(v.ptr))
+}
+
 // SameValue returns true if the other value is the same value.
 // This is equivalent to `Object.is(v, other)` in JS.
 func (v *Value) SameValue(other *Value) bool {

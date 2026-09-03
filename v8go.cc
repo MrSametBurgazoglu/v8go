@@ -1702,6 +1702,14 @@ int ValueSameValue(ValuePtr val1, ValuePtr val2) {
   return value1->SameValue(value2);
 }
 
+int ValueIdentityHash(ValuePtr val) {
+  Isolate* iso = val->iso;
+  ISOLATE_SCOPE(iso);
+  Local<Value> value = val->ptr.Get(iso);
+  if (!value->IsObject()) return 0;
+  return Local<Object>::Cast(value)->GetIdentityHash();
+}
+
 int ValueIsUndefined(ValuePtr ptr) {
   LOCAL_VALUE(ptr);
   return value->IsUndefined();

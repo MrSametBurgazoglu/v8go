@@ -87,8 +87,9 @@ func NewFunctionTemplate(iso *Isolate, callback FunctionCallback) *FunctionTempl
 	cbref := iso.registerCallback(callback)
 
 	tmpl := &template{
-		ptr: C.NewFunctionTemplate(iso.ptr, C.int(cbref)),
-		iso: iso,
+		ptr:   C.NewFunctionTemplate(iso.ptr, C.int(cbref)),
+		iso:   iso,
+		cbref: cbref,
 	}
 	runtime.SetFinalizer(tmpl, (*template).finalizer)
 	return &FunctionTemplate{tmpl}
@@ -131,8 +132,9 @@ func (tmpl *FunctionTemplate) PrototypeMethod(name string, cb FunctionCallback) 
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
 	child := &template{
-		ptr: C.FunctionTemplatePrototypeSetMethod(tmpl.ptr, cname, C.int(cbref)),
-		iso: tmpl.iso,
+		ptr:   C.FunctionTemplatePrototypeSetMethod(tmpl.ptr, cname, C.int(cbref)),
+		iso:   tmpl.iso,
+		cbref: cbref,
 	}
 	runtime.SetFinalizer(child, (*template).finalizer)
 	return &FunctionTemplate{child}
@@ -170,6 +172,11 @@ func goFunctionCallback(ctxref int, cbref int, thisAndArgs *C.ValuePtr, argsCoun
 	}
 
 	callbackFunc := ctx.iso.getCallback(cbref)
+	if callbackFunc == nil {
+		// The template was released after this function was made — a
+		// function kept past its context's life. Undefined, not a crash.
+		return nil
+	}
 	if val := callbackFunc(info); val != nil {
 		return val.ptr
 	}

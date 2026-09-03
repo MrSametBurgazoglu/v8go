@@ -18,6 +18,44 @@ import (
 type template struct {
 	ptr C.TemplatePtr
 	iso *Isolate
+	// cbref is the callback a FunctionTemplate registered with its isolate,
+	// zero for an ObjectTemplate; cbrefs are any more the template registered
+	// since — a call-as-function handler, a prototype method's. Release
+	// unregisters them all.
+	cbref  int
+	cbrefs []int
+}
+
+// Release frees the template now, on a thread that owns the isolate: the
+// Persistent handle behind it is reset while the isolate is alive, and a
+// FunctionTemplate's Go callback is unregistered from the isolate.
+//
+// The finalizer cannot do either — it runs on the collector's goroutine, and
+// the isolate may already be gone — so it leaks both on purpose, and an
+// embedder that builds templates per document on a long-lived isolate grows
+// without a ceiling until it calls this. Call it only once every context that
+// instantiated the template has been closed: a function from a released
+// FunctionTemplate that is still reachable answers undefined when called.
+func (t *template) Release() {
+	if t == nil || t.ptr == nil {
+		return
+	}
+	runtime.SetFinalizer(t, nil)
+	if t.iso != nil {
+		if t.cbref != 0 {
+			t.iso.unregisterCallback(t.cbref)
+		}
+		for _, ref := range t.cbrefs {
+			t.iso.unregisterCallback(ref)
+		}
+	}
+	t.cbref, t.cbrefs = 0, nil
+	if t.iso != nil && t.iso.ptr != nil {
+		C.TemplateRelease(t.ptr)
+	} else {
+		C.TemplateFreeWrapper(t.ptr)
+	}
+	t.ptr = nil
 }
 
 // Set adds a property to each instance created by this template.

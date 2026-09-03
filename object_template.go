@@ -98,6 +98,7 @@ func (o *ObjectTemplate) SetCallAsFunctionHandler(callback FunctionCallback) {
 		panic("nil FunctionCallback argument not supported")
 	}
 	cbref := o.iso.registerCallback(callback)
+	o.cbrefs = append(o.cbrefs, cbref)
 	C.ObjectTemplateSetCallAsFunctionHandler(o.ptr, C.int(cbref))
 	runtime.KeepAlive(o)
 }

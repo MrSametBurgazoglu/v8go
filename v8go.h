@@ -237,6 +237,10 @@ extern void ContextRegisterModule(ContextPtr ctx_ptr,
                                  const char* source);
 
 extern void TemplateFreeWrapper(TemplatePtr ptr);
+// TemplateRelease resets the Persistent behind the template and frees the
+// wrapper. Unlike TemplateFreeWrapper it needs the isolate alive and the
+// caller to be a thread that may enter it.
+extern void TemplateRelease(TemplatePtr ptr);
 extern void TemplateSetValue(TemplatePtr ptr,
                              const char* name,
                              ValuePtr val_ptr,

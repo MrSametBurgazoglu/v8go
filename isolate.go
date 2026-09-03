@@ -429,6 +429,24 @@ func (i *Isolate) registerCallback(cb FunctionCallback) int {
 	return ref
 }
 
+// CallbackCount is how many Go callbacks this isolate holds on behalf of the
+// function templates made in it. Every FunctionTemplate registers one and
+// nothing unregisters it, so an embedder that builds templates per document
+// on a long-lived isolate sees this grow with every navigation — which is
+// what a leak test reads it for.
+func (i *Isolate) CallbackCount() int {
+	i.cbMutex.RLock()
+	defer i.cbMutex.RUnlock()
+	return len(i.cbs)
+}
+
+// unregisterCallback forgets a callback a released template registered.
+func (i *Isolate) unregisterCallback(ref int) {
+	i.cbMutex.Lock()
+	delete(i.cbs, ref)
+	i.cbMutex.Unlock()
+}
+
 func (i *Isolate) getCallback(ref int) FunctionCallback {
 	i.cbMutex.RLock()
 	defer i.cbMutex.RUnlock()

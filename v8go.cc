@@ -826,6 +826,18 @@ void TemplateFreeWrapper(TemplatePtr tmpl) {
   delete tmpl;
 }
 
+void TemplateRelease(TemplatePtr ptr) {
+  if (!ptr) return;
+  {
+    Isolate* iso = ptr->iso;
+    Locker locker(iso);
+    Isolate::Scope isolate_scope(iso);
+    ptr->ptr->Reset();
+  }
+  delete ptr->ptr;
+  delete ptr;
+}
+
 void TemplateSetValue(TemplatePtr ptr,
                       const char* name,
                       ValuePtr val,

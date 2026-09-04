@@ -22,6 +22,58 @@ using namespace v8;
 auto default_platform = platform::NewDefaultPlatform();
 ArrayBuffer::Allocator* default_allocator;
 
+// BoundedArrayBufferAllocator refuses a request past a ceiling instead of
+// letting V8's default allocator take the process down.
+//
+// V8's default allocator calls FatalProcessOutOfMemory when the underlying
+// allocation fails, which is an abort: SIGTRAP, no Go panic, nothing above can
+// catch it, and the embedder's whole process goes. That is the right behaviour
+// for a shell whose only job is to run one script, and the wrong one for a
+// browser, where the allocation size is chosen by the PAGE:
+//
+//     new Int32Array(536870911)   // two gigabytes
+//
+// is four lines of script that end the browser. Returning nullptr instead is
+// what the ArrayBuffer::Allocator contract asks for on failure, and V8 turns it
+// into the RangeError every engine throws: "Array buffer allocation failed".
+//
+// The ceiling is deliberately generous — a page doing real work with typed
+// arrays (a decoder, a wasm heap, an image buffer) stays well under it — and
+// the point is not the number but that a limit exists at all and that passing
+// it is an exception rather than an abort. Allocate() still tries the real
+// allocation below the ceiling and still returns nullptr if THAT fails, so a
+// machine genuinely out of memory also throws rather than aborting.
+class BoundedArrayBufferAllocator : public ArrayBuffer::Allocator {
+ public:
+  explicit BoundedArrayBufferAllocator(size_t ceiling) : ceiling_(ceiling) {}
+
+  void* Allocate(size_t length) override {
+    if (length > ceiling_) {
+      return nullptr;
+    }
+    // calloc rather than malloc+memset: the contract is zeroed memory, and a
+    // failed calloc returns nullptr, which is exactly what we want to pass on.
+    return calloc(length, 1);
+  }
+
+  void* AllocateUninitialized(size_t length) override {
+    if (length > ceiling_) {
+      return nullptr;
+    }
+    return malloc(length);
+  }
+
+  void Free(void* data, size_t) override { free(data); }
+
+ private:
+  size_t ceiling_;
+};
+
+// One gibibyte. Chromium's own limit for a single ArrayBuffer on 64-bit is of
+// this order, and a page that needs more than a gigabyte in one buffer is not a
+// page a browser can serve anyway.
+static const size_t kMaxArrayBufferBytes = 1024ull * 1024ull * 1024ull;
+
 const int ScriptCompilerNoCompileOptions = ScriptCompiler::kNoCompileOptions;
 const int ScriptCompilerConsumeCodeCache = ScriptCompiler::kConsumeCodeCache;
 const int ScriptCompilerEagerCompile = ScriptCompiler::kEagerCompile;
@@ -161,7 +213,7 @@ void Init() {
   V8::InitializePlatform(default_platform.get());
   V8::Initialize();
 
-  default_allocator = ArrayBuffer::Allocator::NewDefaultAllocator();
+  default_allocator = new BoundedArrayBufferAllocator(kMaxArrayBufferBytes);
   return;
 }
 

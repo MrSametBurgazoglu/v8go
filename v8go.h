@@ -332,6 +332,39 @@ extern TemplatePtr TemplateSetSymbolMethod(TemplatePtr ptr,
                                            const char* symbol,
                                            int callback_ref);
 
+// Named and indexed property interceptors.
+//
+// The DOM is full of objects whose properties are not known in advance:
+// document.forms.myForm, collection[3], localStorage.token, el.dataset.userId,
+// window.someIframeName. An embedder without interceptors has to define each
+// name eagerly and redefine them whenever the tree changes, which is both
+// slower and observably wrong — a name that appears after the object was built
+// is simply absent.
+//
+// Each ref is a Go callback ref, or -1 for absent. The getter and query
+// callbacks answer undefined to mean "not mine, keep looking"; the enumerator
+// answers an array of names.
+//
+// |flags| carries v8::PropertyHandlerFlags: 1 = kNonMasking (consult the
+// interceptor ONLY for names that do not already exist — the default masks,
+// consulting the interceptor first, which is what [LegacyOverrideBuiltIns]
+// describes), 2 = kOnlyInterceptStrings, 4 = kHasNoSideEffect.
+extern void ObjectTemplateSetNamedPropertyHandler(TemplatePtr ptr,
+                                                  int getter_ref,
+                                                  int setter_ref,
+                                                  int query_ref,
+                                                  int deleter_ref,
+                                                  int enumerator_ref,
+                                                  int flags);
+
+extern void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
+                                                    int getter_ref,
+                                                    int setter_ref,
+                                                    int query_ref,
+                                                    int deleter_ref,
+                                                    int enumerator_ref,
+                                                    int flags);
+
 extern ValuePtr NewValueNull(IsolatePtr iso_ptr);
 extern ValuePtr NewValueUndefined(IsolatePtr iso_ptr);
 extern ValuePtr NewValueInteger(IsolatePtr iso_ptr, int32_t v);

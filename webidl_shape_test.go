@@ -295,3 +295,131 @@ func TestPropertyAttributesMeanWhatTheySay(t *testing.T) {
 		}
 	}
 }
+
+// A live collection answers names and indices that did not exist when the
+// object was built. Defining each one eagerly is what this replaces, and the
+// difference shows the moment the underlying list changes.
+func TestNamedAndIndexedInterceptors(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+
+	// The "collection" the interceptors answer from. It changes after the
+	// object exists, which is the case an eager definition cannot follow.
+	items := []string{"alpha", "beta"}
+
+	tmpl := v8.NewObjectTemplate(iso)
+	collection := v8.NewObjectTemplate(iso)
+	collection.SetIndexedPropertyHandler(func(info *v8.FunctionCallbackInfo) *v8.Value {
+		index := int(info.Args()[0].Number())
+		if index < 0 || index >= len(items) {
+			return nil // not ours
+		}
+		val, _ := v8.NewValue(iso, items[index])
+		return val
+	}, v8.HandlerNone)
+	collection.SetNamedPropertyHandler(func(info *v8.FunctionCallbackInfo) *v8.Value {
+		name := info.Args()[0].String()
+		if name == "length" {
+			val, _ := v8.NewValue(iso, int32(len(items)))
+			return val
+		}
+		for _, item := range items {
+			if item == name {
+				val, _ := v8.NewValue(iso, "named:"+item)
+				return val
+			}
+		}
+		return nil
+	}, nil, v8.HandlerNone)
+
+	if err := tmpl.Set("list", collection); err != nil {
+		t.Fatal(err)
+	}
+	ctx := v8.NewContext(iso, tmpl)
+	defer ctx.Close()
+
+	check := func(expr, want string) {
+		t.Helper()
+		val, err := ctx.RunScript(expr, "t.js")
+		if err != nil {
+			t.Fatalf("%s: %v", expr, err)
+		}
+		if got := val.String(); got != want {
+			t.Errorf("%s = %q, want %q", expr, got, want)
+		}
+	}
+
+	check("list[0]", "alpha")
+	check("list[1]", "beta")
+	check("list.length", "2")
+	check("list.alpha", "named:alpha")
+
+	// Declining must let the lookup continue rather than answering undefined
+	// and stopping: an object whose interceptor swallowed every miss would
+	// have no constructor, no toString and no prototype chain.
+	check("typeof list.constructor", "function")
+	check("typeof list.toString", "function")
+	check("list[9]", "undefined")
+
+	// The list changes; the object follows without being redefined.
+	items = append(items, "gamma")
+	check("list[2]", "gamma")
+	check("list.length", "3")
+	check("list.gamma", "named:gamma")
+}
+
+// V8's flag reads backwards, and getting it wrong is the difference between a
+// collection whose named getter shadows `length` and one that does not.
+//
+// The default masks: the interceptor is consulted before the object's own
+// properties, which is what WebIDL's [LegacyOverrideBuiltIns] describes.
+// kNonMasking is the other way round — consulted only for names that do not
+// exist — which is what every interface without that extended attribute needs.
+func TestNonMaskingHandlerDefersToExistingNames(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+
+	plain := v8.NewObjectTemplate(iso)
+	masking := v8.NewObjectTemplate(iso)
+	nonMasking := v8.NewObjectTemplate(iso)
+	for _, c := range []struct {
+		tmpl  *v8.ObjectTemplate
+		flags v8.PropertyHandlerFlags
+	}{{masking, v8.HandlerNone}, {nonMasking, v8.HandlerNonMasking}} {
+		val, _ := v8.NewValue(iso, "own")
+		if err := c.tmpl.Set("taken", val); err != nil {
+			t.Fatal(err)
+		}
+		c.tmpl.SetNamedPropertyHandler(func(info *v8.FunctionCallbackInfo) *v8.Value {
+			if info.Args()[0].String() == "taken" {
+				out, _ := v8.NewValue(iso, "intercepted")
+				return out
+			}
+			return nil
+		}, nil, c.flags)
+	}
+	if err := plain.Set("masking", masking); err != nil {
+		t.Fatal(err)
+	}
+	if err := plain.Set("nonMasking", nonMasking); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := v8.NewContext(iso, plain)
+	defer ctx.Close()
+
+	for _, c := range []struct{ expr, want string }{
+		// The default consults the interceptor first, so it wins.
+		{"masking.taken", "intercepted"},
+		// Non-masking leaves an existing own property alone.
+		{"nonMasking.taken", "own"},
+	} {
+		val, err := ctx.RunScript(c.expr, "t.js")
+		if err != nil {
+			t.Fatalf("%s: %v", c.expr, err)
+		}
+		if got := val.String(); got != c.want {
+			t.Errorf("%s = %q, want %q", c.expr, got, c.want)
+		}
+	}
+}

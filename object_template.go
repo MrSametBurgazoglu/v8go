@@ -115,3 +115,78 @@ func (o *ObjectTemplate) SetCallAsFunctionHandler(callback FunctionCallback) {
 func (o *ObjectTemplate) apply(opts *contextOptions) {
 	opts.gTmpl = o
 }
+
+// PropertyHandlerFlags configure an interceptor.
+type PropertyHandlerFlags int
+
+const (
+	// HandlerNone is V8's default, and it masks: the interceptor is consulted
+	// FIRST, before the object's own properties and its prototype chain. That
+	// is what WebIDL's [LegacyOverrideBuiltIns] describes — a named property
+	// on document or on a form wins over a built-in of the same name.
+	HandlerNone PropertyHandlerFlags = 0
+	// HandlerNonMasking is the other way round: the interceptor is consulted
+	// only for names that do not already exist. This is what an interface
+	// WITHOUT [LegacyOverrideBuiltIns] needs, which is most of them — a
+	// collection whose named getter shadowed `length` or `item` would be
+	// unusable.
+	//
+	// The name is V8's and reads backwards at first: "non-masking" means it
+	// does not mask the object's own properties.
+	HandlerNonMasking PropertyHandlerFlags = 1 << 0
+	// HandlerOnlyInterceptStrings skips symbol keys, so a well-known symbol
+	// on the prototype is not shadowed by a named-property lookup.
+	HandlerOnlyInterceptStrings PropertyHandlerFlags = 1 << 1
+	// HandlerHasNoSideEffect promises the getter is side-effect free, which
+	// lets a debugger evaluate through it.
+	HandlerHasNoSideEffect PropertyHandlerFlags = 1 << 2
+)
+
+// SetNamedPropertyHandler intercepts property reads by name.
+//
+// The DOM is full of objects whose property names are not known in advance:
+// document.forms.myForm, localStorage.token, el.dataset.userId,
+// window.someIframeName. Defining each name eagerly is slower than
+// intercepting and observably wrong — a name that appears after the object was
+// built is simply absent until something redefines it.
+//
+// getter is called with the name as its only argument and the object as `this`;
+// returning nil or undefined means "not mine", and V8 continues the lookup
+// through the object's own properties and its prototype chain. enumerator may
+// be nil; when given it returns an array of names for Object.keys and for..in.
+//
+// Mind the flags: with HandlerNone the interceptor is consulted BEFORE the
+// object's own properties, which is right for [LegacyOverrideBuiltIns] and
+// wrong for everything else. See PropertyHandlerFlags.
+func (o *ObjectTemplate) SetNamedPropertyHandler(getter, enumerator FunctionCallback, flags PropertyHandlerFlags) {
+	getterRef := C.int(-1)
+	if getter != nil {
+		ref := o.iso.registerCallback(getter)
+		o.cbrefs = append(o.cbrefs, ref)
+		getterRef = C.int(ref)
+	}
+	enumeratorRef := C.int(-1)
+	if enumerator != nil {
+		ref := o.iso.registerCallback(enumerator)
+		o.cbrefs = append(o.cbrefs, ref)
+		enumeratorRef = C.int(ref)
+	}
+	C.ObjectTemplateSetNamedPropertyHandler(o.ptr, getterRef, -1, -1, -1, enumeratorRef, C.int(flags))
+	runtime.KeepAlive(o)
+}
+
+// SetIndexedPropertyHandler intercepts property reads by index, which is what
+// makes collection[3] answer without every index being defined in advance.
+//
+// getter is called with the index as a number. Returning nil or undefined
+// means "not mine".
+func (o *ObjectTemplate) SetIndexedPropertyHandler(getter FunctionCallback, flags PropertyHandlerFlags) {
+	getterRef := C.int(-1)
+	if getter != nil {
+		ref := o.iso.registerCallback(getter)
+		o.cbrefs = append(o.cbrefs, ref)
+		getterRef = C.int(ref)
+	}
+	C.ObjectTemplateSetIndexedPropertyHandler(o.ptr, getterRef, -1, -1, -1, -1, C.int(flags))
+	runtime.KeepAlive(o)
+}

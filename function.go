@@ -7,6 +7,7 @@ package v8go
 // #include "v8go.h"
 import "C"
 import (
+	"errors"
 	"unsafe"
 )
 
@@ -16,7 +17,16 @@ type Function struct {
 }
 
 // Call this JavaScript function with the given arguments.
+//
+// A function whose context has been closed answers an error rather than being
+// called: the handle it holds points into a disposed context, and V8 reads
+// freed memory from it. That happens whenever a document keeps a callable
+// belonging to one that has gone away, which an iframe navigating itself does
+// routinely.
 func (fn *Function) Call(recv Valuer, args ...Valuer) (*Value, error) {
+	if fn == nil || fn.Value == nil || fn.ctx == nil || getContext(fn.ctx.ref) == nil {
+		return nil, errors.New("v8go: the function's context has been closed")
+	}
 	var argptr *C.ValuePtr
 	if len(args) > 0 {
 		var cArgs = make([]C.ValuePtr, len(args))

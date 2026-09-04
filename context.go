@@ -189,6 +189,15 @@ func getContext(ref int) *Context {
 //export goContext
 func goContext(ref int) C.ContextPtr {
 	ctx := getContext(ref)
+	if ctx == nil {
+		// The context has been closed while something still held a handle
+		// into it — a function belonging to a document that has gone away,
+		// called from one that has not. Dereferencing here segfaults the
+		// process from inside cgo, where no Go recover can reach it; a null
+		// ContextPtr makes the C++ side fail the call instead, and the caller
+		// sees an error it can report.
+		return nil
+	}
 	return ctx.ptr
 }
 

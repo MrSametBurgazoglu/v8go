@@ -156,6 +156,14 @@ func (tmpl *FunctionTemplate) PrototypeMethod(name string, cb FunctionCallback) 
 //export goFunctionCallback
 func goFunctionCallback(ctxref int, cbref int, thisAndArgs *C.ValuePtr, argsCount int, thisField0 C.int64_t) C.ValuePtr {
 	ctx := getContext(ctxref)
+	if ctx == nil {
+		// The context has been closed since the function was made. The C++
+		// side declines the call before it gets here, so this is the second
+		// fence rather than the first — but every line below reads ctx, and a
+		// nil dereference in a cgo callback is a crash, not a panic anything
+		// can recover.
+		return nil
+	}
 
 	this := *thisAndArgs
 	info := &FunctionCallbackInfo{

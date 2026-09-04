@@ -995,8 +995,36 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
   // at runtime. We extract the Context reference from the embedder data so that
   // we can use the context registry to match the Context on the Go side
   Local<Context> local_ctx = iso->GetCurrentContext();
-  int ctx_ref = local_ctx->GetEmbedderData(1).As<Integer>()->Value();
+  if (local_ctx.IsEmpty()) {
+    return;
+  }
+  Local<Value> ref_val = local_ctx->GetEmbedderData(1);
+  if (ref_val.IsEmpty() || !ref_val->IsInt32()) {
+    return;
+  }
+  int ctx_ref = ref_val.As<Integer>()->Value();
   m_ctx* ctx = goContext(ctx_ref);
+  if (ctx == nullptr) {
+    // The context that owns this function has been closed while something
+    // still held the function: a document that has gone away, called from one
+    // that has not. V8 enters an API function's OWN creation context before
+    // invoking it, so this fires whenever a page keeps a callable — or an
+    // object with methods on it — belonging to an iframe it then navigates.
+    //
+    // goContext answers null for exactly that and says so in its comment, but
+    // nothing here checked: tracked_value writes through ctx to
+    // ctx->nextValId, sixteen decimal bytes past a null pointer, and the
+    // process dies inside cgo where no Go recover can reach it. Five lines of
+    // page script were enough —
+    //
+    //   const d = frame.contentDocument;
+    //   frame.onload = () => d.createElement("div");
+    //   frame.src = "...";
+    //
+    // Answering undefined is what the embedder's own guard for this
+    // (js.Runtime.gone) already answers when the call gets as far as Go.
+    return;
+  }
 
   int callback_ref = info.Data().As<Integer>()->Value();
 
@@ -1331,8 +1359,17 @@ bool interceptorContext(const PropertyCallbackInfo<Value>& info,
   if (local_ctx.IsEmpty()) {
     return false;
   }
-  *ctx_ref = local_ctx->GetEmbedderData(1).As<Integer>()->Value();
+  Local<Value> ref_val = local_ctx->GetEmbedderData(1);
+  if (ref_val.IsEmpty() || !ref_val->IsInt32()) {
+    return false;
+  }
+  *ctx_ref = ref_val.As<Integer>()->Value();
   *ctx = goContext(*ctx_ref);
+  // A closed context: the interceptor declines rather than dereferencing null
+  // in callInterceptor's tracked_value. See FunctionTemplateCallback.
+  if (*ctx == nullptr) {
+    return false;
+  }
   *callback_ref = info.Data().As<Integer>()->Value();
   return true;
 }
@@ -1429,8 +1466,17 @@ void namedEnumerator(const PropertyCallbackInfo<Array>& info) {
   if (local_ctx.IsEmpty()) {
     return;
   }
-  int ctx_ref = local_ctx->GetEmbedderData(1).As<Integer>()->Value();
+  Local<Value> ref_val = local_ctx->GetEmbedderData(1);
+  if (ref_val.IsEmpty() || !ref_val->IsInt32()) {
+    return;
+  }
+  int ctx_ref = ref_val.As<Integer>()->Value();
   m_ctx* ctx = goContext(ctx_ref);
+  // A closed context enumerates nothing rather than dereferencing null. See
+  // FunctionTemplateCallback.
+  if (ctx == nullptr) {
+    return;
+  }
   int callback_ref = info.Data().As<Integer>()->Value();
 
   m_value* _this = new m_value;

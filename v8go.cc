@@ -1126,6 +1126,126 @@ TemplatePtr FunctionTemplatePrototypeSetMethod(TemplatePtr ptr,
   return ot;
 }
 
+/********** WebIDL binding shape **********/
+
+// A generated interface is a FunctionTemplate whose prototype carries accessor
+// pairs and methods, whose instances carry internal fields, and which inherits
+// from its parent interface's template. What follows is what that needs and
+// what v8go did not expose.
+
+void FunctionTemplateInherit(TemplatePtr ptr, TemplatePtr parent) {
+  LOCAL_TEMPLATE(ptr);
+  Local<Template> parent_tmpl = parent->ptr->Get(iso);
+  tmpl.As<FunctionTemplate>()->Inherit(parent_tmpl.As<FunctionTemplate>());
+}
+
+static TemplatePtr wrapTemplate(Isolate* iso, Local<Template> child) {
+  m_template* ot = new m_template;
+  ot->iso = iso;
+  ot->ptr = new Persistent<Template>(iso, child);
+  return ot;
+}
+
+TemplatePtr FunctionTemplateInstanceTemplate(TemplatePtr ptr) {
+  LOCAL_TEMPLATE(ptr);
+  return wrapTemplate(iso, tmpl.As<FunctionTemplate>()->InstanceTemplate());
+}
+
+TemplatePtr FunctionTemplatePrototypeTemplate(TemplatePtr ptr) {
+  LOCAL_TEMPLATE(ptr);
+  return wrapTemplate(iso, tmpl.As<FunctionTemplate>()->PrototypeTemplate());
+}
+
+void FunctionTemplateSetClassName(TemplatePtr ptr, const char* name) {
+  LOCAL_TEMPLATE(ptr);
+  Local<String> class_name =
+      String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
+  tmpl.As<FunctionTemplate>()->SetClassName(class_name);
+}
+
+void FunctionTemplateSetLength(TemplatePtr ptr, int length) {
+  LOCAL_TEMPLATE(ptr);
+  tmpl.As<FunctionTemplate>()->SetLength(length);
+}
+
+void FunctionTemplateReadOnlyPrototype(TemplatePtr ptr) {
+  LOCAL_TEMPLATE(ptr);
+  tmpl.As<FunctionTemplate>()->ReadOnlyPrototype();
+}
+
+void TemplateSetAccessorProperty(TemplatePtr ptr,
+                                 const char* name,
+                                 int getter_ref,
+                                 int setter_ref,
+                                 int attributes) {
+  LOCAL_TEMPLATE(ptr);
+  Local<String> prop_name =
+      String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
+
+  Local<FunctionTemplate> getter;
+  if (getter_ref >= 0) {
+    getter = FunctionTemplate::New(iso, FunctionTemplateCallback,
+                                   Integer::New(iso, getter_ref));
+  }
+  Local<FunctionTemplate> setter;
+  if (setter_ref >= 0) {
+    setter = FunctionTemplate::New(iso, FunctionTemplateCallback,
+                                   Integer::New(iso, setter_ref));
+  }
+  tmpl->SetAccessorProperty(prop_name, getter, setter,
+                            static_cast<PropertyAttribute>(attributes));
+}
+
+static Local<Symbol> wellKnownSymbol(Isolate* iso, const char* symbol) {
+  std::string name(symbol);
+  if (name == "toStringTag") {
+    return Symbol::GetToStringTag(iso);
+  }
+  if (name == "iterator") {
+    return Symbol::GetIterator(iso);
+  }
+  if (name == "asyncIterator") {
+    return Symbol::GetAsyncIterator(iso);
+  }
+  if (name == "hasInstance") {
+    return Symbol::GetHasInstance(iso);
+  }
+  if (name == "toPrimitive") {
+    return Symbol::GetToPrimitive(iso);
+  }
+  if (name == "unscopables") {
+    return Symbol::GetUnscopables(iso);
+  }
+  return Local<Symbol>();
+}
+
+void TemplateSetSymbolValue(TemplatePtr ptr,
+                            const char* symbol,
+                            ValuePtr val,
+                            int attributes) {
+  LOCAL_TEMPLATE(ptr);
+  Local<Symbol> key = wellKnownSymbol(iso, symbol);
+  if (key.IsEmpty()) {
+    return;
+  }
+  Local<Value> value = val->ptr.Get(iso);
+  tmpl->Set(key, value, static_cast<PropertyAttribute>(attributes));
+}
+
+TemplatePtr TemplateSetSymbolMethod(TemplatePtr ptr,
+                                    const char* symbol,
+                                    int callback_ref) {
+  LOCAL_TEMPLATE(ptr);
+  Local<Symbol> key = wellKnownSymbol(iso, symbol);
+  if (key.IsEmpty()) {
+    return nullptr;
+  }
+  Local<FunctionTemplate> child = FunctionTemplate::New(
+      iso, FunctionTemplateCallback, Integer::New(iso, callback_ref));
+  tmpl->Set(key, child);
+  return wrapTemplate(iso, child);
+}
+
 /********** Context **********/
 
 #define LOCAL_CONTEXT(ctx)                      \

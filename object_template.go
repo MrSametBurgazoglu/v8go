@@ -17,15 +17,24 @@ import (
 // can also be validated when accessing a property.
 type PropertyAttribute uint8
 
+// These are V8's own values, and they have to be: they are passed through to
+// v8::PropertyAttribute unchanged.
+//
+// They were 2, 4 and 8 — `1 << iota` inside a const block whose first line
+// already consumed iota 0. Every flag was therefore one position too high:
+// asking for ReadOnly set DontEnum, asking for DontEnum set DontDelete, and
+// DontDelete was 8, outside V8's three-bit mask, where it did nothing at all.
+// A property asked to be non-configurable was configurable, and a test that
+// deleted one found it gone.
 const (
 	// None.
 	None PropertyAttribute = 0
 	// ReadOnly, ie. not writable.
-	ReadOnly PropertyAttribute = 1 << iota
+	ReadOnly PropertyAttribute = 1 << 0
 	// DontEnum, ie. not enumerable.
-	DontEnum
+	DontEnum PropertyAttribute = 1 << 1
 	// DontDelete, ie. not configurable.
-	DontDelete
+	DontDelete PropertyAttribute = 1 << 2
 )
 
 // ObjectTemplate is used to create objects at runtime.

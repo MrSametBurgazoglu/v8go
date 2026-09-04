@@ -276,6 +276,62 @@ extern TemplatePtr FunctionTemplatePrototypeSetMethod(TemplatePtr ptr,
                                                       const char* name,
                                                       int callback_ref);
 
+// The pieces a WebIDL binding needs and v8go did not expose.
+//
+// A generated interface is a FunctionTemplate whose prototype carries accessor
+// pairs and methods, whose instances carry an internal field, and which
+// inherits from its parent interface's template. Building that with
+// PrototypeSetValue alone means data properties where the specification says
+// accessor, and no inheritance at all — both observable from a page.
+
+// FunctionTemplateInherit makes |ptr|'s instances inherit from |parent|'s, so
+// the prototype chain matches the interface hierarchy.
+extern void FunctionTemplateInherit(TemplatePtr ptr, TemplatePtr parent);
+
+// FunctionTemplateInstanceTemplate and FunctionTemplatePrototypeTemplate
+// return the two ObjectTemplates of a FunctionTemplate. The first shapes each
+// instance (internal fields, unforgeable own properties); the second is what
+// every instance inherits.
+extern TemplatePtr FunctionTemplateInstanceTemplate(TemplatePtr ptr);
+extern TemplatePtr FunctionTemplatePrototypeTemplate(TemplatePtr ptr);
+
+// FunctionTemplateSetClassName sets the name instances report through
+// constructor.name and in a stack trace.
+extern void FunctionTemplateSetClassName(TemplatePtr ptr, const char* name);
+
+// FunctionTemplateSetLength sets the constructor's `length`, which WebIDL
+// derives from the required argument count.
+extern void FunctionTemplateSetLength(TemplatePtr ptr, int length);
+
+// FunctionTemplateReadOnlyPrototype makes the instance prototype
+// non-writable, as an interface object's is.
+extern void FunctionTemplateReadOnlyPrototype(TemplatePtr ptr);
+
+// TemplateSetAccessorProperty installs a real accessor pair on a template.
+// Either callback ref may be -1 for absent. This is the shape a WebIDL
+// attribute has: `Object.getOwnPropertyDescriptor(proto, name).get` is a
+// function, and a page that reads it, patches it, or subclasses can tell it
+// from a data property.
+extern void TemplateSetAccessorProperty(TemplatePtr ptr,
+                                        const char* name,
+                                        int getter_ref,
+                                        int setter_ref,
+                                        int attributes);
+
+// TemplateSetSymbolValue sets a well-known-symbol-keyed property.
+// |symbol| names which: "toStringTag", "iterator", "asyncIterator",
+// "hasInstance", "toPrimitive", "unscopables".
+extern void TemplateSetSymbolValue(TemplatePtr ptr,
+                                   const char* symbol,
+                                   ValuePtr val,
+                                   int attributes);
+
+// TemplateSetSymbolMethod is TemplateSetSymbolValue for a method, wiring a
+// child FunctionTemplate the way FunctionTemplatePrototypeSetMethod does.
+extern TemplatePtr TemplateSetSymbolMethod(TemplatePtr ptr,
+                                           const char* symbol,
+                                           int callback_ref);
+
 extern ValuePtr NewValueNull(IsolatePtr iso_ptr);
 extern ValuePtr NewValueUndefined(IsolatePtr iso_ptr);
 extern ValuePtr NewValueInteger(IsolatePtr iso_ptr, int32_t v);

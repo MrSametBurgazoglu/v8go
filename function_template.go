@@ -182,3 +182,53 @@ func goFunctionCallback(ctxref int, cbref int, thisAndArgs *C.ValuePtr, argsCoun
 	}
 	return nil
 }
+
+// Inherit makes this template's instances inherit from parent's, so a
+// generated interface's prototype chain matches the specification's hierarchy:
+// HTMLDivElement -> HTMLElement -> Element -> Node -> EventTarget.
+func (tmpl *FunctionTemplate) Inherit(parent *FunctionTemplate) {
+	C.FunctionTemplateInherit(tmpl.ptr, parent.ptr)
+	runtime.KeepAlive(tmpl)
+	runtime.KeepAlive(parent)
+}
+
+// InstanceTemplate shapes each instance the template constructs: its internal
+// fields, and the own properties WebIDL calls [LegacyUnforgeable].
+func (tmpl *FunctionTemplate) InstanceTemplate() *ObjectTemplate {
+	return tmpl.childTemplate(C.FunctionTemplateInstanceTemplate(tmpl.ptr))
+}
+
+// PrototypeTemplate is what every instance inherits: the interface's methods
+// and its accessor pairs.
+func (tmpl *FunctionTemplate) PrototypeTemplate() *ObjectTemplate {
+	return tmpl.childTemplate(C.FunctionTemplatePrototypeTemplate(tmpl.ptr))
+}
+
+func (tmpl *FunctionTemplate) childTemplate(ptr C.TemplatePtr) *ObjectTemplate {
+	child := &ObjectTemplate{&template{ptr: ptr, iso: tmpl.iso}}
+	runtime.KeepAlive(tmpl)
+	runtime.SetFinalizer(child.template, (*template).finalizer)
+	return child
+}
+
+// SetClassName sets what instances report through constructor.name.
+func (tmpl *FunctionTemplate) SetClassName(name string) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	C.FunctionTemplateSetClassName(tmpl.ptr, cname)
+	runtime.KeepAlive(tmpl)
+}
+
+// SetLength sets the constructor's `length`, which WebIDL derives from the
+// number of required arguments.
+func (tmpl *FunctionTemplate) SetLength(length int) {
+	C.FunctionTemplateSetLength(tmpl.ptr, C.int(length))
+	runtime.KeepAlive(tmpl)
+}
+
+// ReadOnlyPrototype makes the constructor's `prototype` non-writable, as an
+// interface object's is.
+func (tmpl *FunctionTemplate) ReadOnlyPrototype() {
+	C.FunctionTemplateReadOnlyPrototype(tmpl.ptr)
+	runtime.KeepAlive(tmpl)
+}

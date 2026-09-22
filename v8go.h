@@ -225,6 +225,31 @@ extern RtnValue RunScript(ContextPtr ctx_ptr,
 extern RtnValue JSONParse(ContextPtr ctx_ptr, const char* str);
 const char* JSONStringify(ContextPtr ctx_ptr, ValuePtr val_ptr);
 extern ValuePtr ContextGlobal(ContextPtr ctx_ptr);
+
+// ContextKeepGlobal detaches |ctx|'s global proxy and parks it under |ref| —
+// the context's own reference number — for a later NewContextAdoptingGlobal
+// naming that same ref. The context stays valid and is freed by its owner as
+// usual. Reports whether a proxy was parked.
+//
+// Keyed by ref and not by isolate: a tab and every frame in it share one
+// isolate, so an isolate-wide slot lets one browsing context adopt another's
+// window.
+//
+// Detaching is what V8 requires before a global proxy may belong to another
+// context; a detached context is on its way out and must not run script again.
+extern int ContextKeepGlobal(ContextPtr ctx_ptr, int ref);
+
+// NewContextAdoptingGlobal is NewContext, built around the proxy that
+// ContextKeepGlobal parked under |adopt_from| (and clearing that slot). With
+// nothing parked, or adopt_from 0, it is exactly NewContext.
+//
+// V8 reuses the proxy only when the new global template is COMPATIBLE with the
+// one the proxy was made for; when it is not, V8 silently mints a fresh proxy.
+// A caller that depends on identity must assert it rather than assume it.
+extern ContextPtr NewContextAdoptingGlobal(IsolatePtr iso_ptr,
+                                           TemplatePtr global_template_ptr,
+                                           int ref,
+                                           int adopt_from);
 extern void ContextSetSecurityToken(ContextPtr ctx_ptr, ValuePtr token_ptr);
 extern ValuePtr ContextSecurityToken(ContextPtr ctx_ptr);
 

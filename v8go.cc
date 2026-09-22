@@ -1583,6 +1583,72 @@ void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
   Local<Context> local_ctx = ctx->ptr.Get(iso); \
   Context::Scope context_scope(local_ctx);
 
+// The global proxies parked between a context's teardown and its successor's
+// creation, keyed by the outgoing context's own reference number. Not by
+// isolate: a tab and every frame in it share one, and an isolate-wide slot let
+// a frame adopt the page's window.
+static std::unordered_map<int, Global<Value>>& keptGlobals() {
+  static std::unordered_map<int, Global<Value>> kept;
+  return kept;
+}
+
+int ContextKeepGlobal(ContextPtr ctx, int ref) {
+  if (ctx == nullptr || ref == 0) {
+    return 0;
+  }
+  Isolate* iso = ctx->iso;
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  Local<Context> local_ctx = ctx->ptr.Get(iso);
+  if (local_ctx.IsEmpty()) {
+    return 0;
+  }
+  Local<Object> proxy = local_ctx->Global();
+  if (proxy.IsEmpty()) {
+    return 0;
+  }
+  local_ctx->DetachGlobal();
+  keptGlobals()[ref].Reset(iso, proxy);
+  return 1;
+}
+
+ContextPtr NewContextAdoptingGlobal(IsolatePtr iso,
+                                    TemplatePtr global_template_ptr,
+                                    int ref,
+                                    int adopt_from) {
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+
+  Local<ObjectTemplate> global_template;
+  if (global_template_ptr != nullptr) {
+    global_template = global_template_ptr->ptr->Get(iso).As<ObjectTemplate>();
+  } else {
+    global_template = ObjectTemplate::New(iso);
+  }
+
+  MaybeLocal<Value> global_object;
+  auto& kept = keptGlobals();
+  auto it = kept.find(adopt_from);
+  if (it != kept.end()) {
+    if (!it->second.IsEmpty()) {
+      global_object = MaybeLocal<Value>(it->second.Get(iso));
+    }
+    it->second.Reset();
+    kept.erase(it);
+  }
+
+  Local<Context> local_ctx =
+      Context::New(iso, nullptr, global_template, global_object);
+  local_ctx->SetEmbedderData(1, Integer::New(iso, ref));
+
+  m_ctx* ctx = new m_ctx;
+  ctx->ptr.Reset(iso, local_ctx);
+  ctx->iso = iso;
+  return ctx;
+}
+
 ContextPtr NewContext(IsolatePtr iso,
                       TemplatePtr global_template_ptr,
                       int ref) {

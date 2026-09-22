@@ -45,6 +45,61 @@ type ContextOption interface {
 
 // NewContext creates a new JavaScript context; if no Isolate is passed as a
 // ContextOption than a new Isolate will be created.
+// Ref is this context's reference number, which identifies it to KeepGlobal
+// and NewContextAdoptingGlobal.
+func (c *Context) Ref() int {
+	if c == nil {
+		return 0
+	}
+	return int(c.ref)
+}
+
+// KeepGlobal detaches this context's global proxy and parks it under this
+// context's ref for a later NewContextAdoptingGlobal naming that ref, which is
+// how one browsing context keeps one `window` across a change of document. The
+// context stays valid and the caller closes it as usual, immediately
+// afterwards.
+//
+// A detached context must not run script again.
+func (c *Context) KeepGlobal() bool {
+	if c == nil || c.ptr == nil {
+		return false
+	}
+	kept := C.ContextKeepGlobal(c.ptr, C.int(c.ref)) != 0
+	runtime.KeepAlive(c)
+	return kept
+}
+
+// NewContextAdoptingGlobal is NewContext built around the global proxy a
+// previous KeepGlobal parked under adoptFrom — the ref of the context being
+// replaced. With nothing parked, or adoptFrom 0, it is NewContext.
+//
+// V8 adopts the proxy only when gTmpl is compatible with the template the
+// proxy was made for, and silently mints a fresh one otherwise — assert
+// identity where it matters rather than assuming it.
+func NewContextAdoptingGlobal(iso *Isolate, gTmpl *ObjectTemplate, adoptFrom int) *Context {
+	if iso == nil {
+		iso = NewIsolate()
+	}
+	if gTmpl == nil {
+		gTmpl = &ObjectTemplate{&template{}}
+	}
+
+	ctxMutex.Lock()
+	ctxSeq++
+	ref := ctxSeq
+	ctxMutex.Unlock()
+
+	ctx := &Context{
+		ref: ref,
+		ptr: C.NewContextAdoptingGlobal(iso.ptr, gTmpl.ptr, C.int(ref), C.int(adoptFrom)),
+		iso: iso,
+	}
+	ctx.register()
+	runtime.KeepAlive(gTmpl)
+	return ctx
+}
+
 func NewContext(opt ...ContextOption) *Context {
 	opts := contextOptions{}
 	for _, o := range opt {

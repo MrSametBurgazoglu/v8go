@@ -460,6 +460,8 @@ extern void ObjectSetIdx(ValuePtr ptr, uint32_t idx, ValuePtr val_ptr);
 extern int ObjectSetInternalField(ValuePtr ptr, int idx, ValuePtr val_ptr);
 extern int ObjectInternalFieldCount(ValuePtr ptr);
 extern RtnValue ObjectGet(ValuePtr ptr, const char* key);
+extern void ObjectSetValueKey(ValuePtr ptr, ValuePtr key_ptr, ValuePtr val_ptr);
+extern RtnValue ObjectGetValueKey(ValuePtr ptr, ValuePtr key_ptr);
 extern RtnValue ObjectGetIdx(ValuePtr ptr, uint32_t idx);
 extern ValuePtr ObjectGetInternalField(ValuePtr ptr, int idx);
 int ObjectHas(ValuePtr ptr, const char* key);

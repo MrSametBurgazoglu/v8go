@@ -2474,6 +2474,33 @@ int ObjectInternalFieldCount(ValuePtr ptr) {
   return obj->InternalFieldCount();
 }
 
+// A property keyed by a Value rather than a string: a Symbol, in practice.
+// Symbol.for(...) keys are what the engine hangs its per-object slots on --
+// getOwnPropertyNames does not list them and a page cannot guess them.
+void ObjectSetValueKey(ValuePtr ptr, ValuePtr key_ptr, ValuePtr prop_val) {
+  LOCAL_OBJECT(ptr);
+  Local<Value> key_val = key_ptr->ptr.Get(iso);
+  obj->Set(local_ctx, key_val, prop_val->ptr.Get(iso)).Check();
+}
+
+RtnValue ObjectGetValueKey(ValuePtr ptr, ValuePtr key_ptr) {
+  LOCAL_OBJECT(ptr);
+  RtnValue rtn = {};
+  Local<Value> key_val = key_ptr->ptr.Get(iso);
+  Local<Value> result;
+  if (!obj->Get(local_ctx, key_val).ToLocal(&result)) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+  m_value* new_val = new m_value;
+  new_val->id = 0;
+  new_val->iso = iso;
+  new_val->ctx = ctx;
+  new_val->ptr = Global<Value>(iso, result);
+  rtn.value = tracked_value(ctx, new_val);
+  return rtn;
+}
+
 RtnValue ObjectGet(ValuePtr ptr, const char* key) {
   LOCAL_OBJECT(ptr);
   RtnValue rtn = {};

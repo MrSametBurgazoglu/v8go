@@ -8,6 +8,7 @@ package v8go
 // #include "v8go.h"
 import "C"
 import (
+	"runtime"
 	"fmt"
 	"math/big"
 	"unsafe"
@@ -101,6 +102,26 @@ func (o *Object) SetInternalField(idx uint32, val interface{}) error {
 func (o *Object) InternalFieldCount() uint32 {
 	count := C.ObjectInternalFieldCount(o.ptr)
 	return uint32(count)
+}
+
+// SetKey sets a property keyed by a Value -- a Symbol -- to a given value,
+// with the same coercion as Set. A Symbol.for(...) key is how an embedder
+// keeps a slot on an object that getOwnPropertyNames does not list.
+func (o *Object) SetKey(key *Value, val interface{}) error {
+	value, err := coerceValue(o.ctx.iso, val)
+	if err != nil {
+		return err
+	}
+	C.ObjectSetValueKey(o.ptr, key.ptr, value.ptr)
+	runtime.KeepAlive(key)
+	return nil
+}
+
+// GetKey is Get for a property keyed by a Value -- a Symbol.
+func (o *Object) GetKey(key *Value) (*Value, error) {
+	rtn := C.ObjectGetValueKey(o.ptr, key.ptr)
+	runtime.KeepAlive(key)
+	return valueResult(o.ctx, rtn)
 }
 
 // Get tries to get a Value for a given Object property key.

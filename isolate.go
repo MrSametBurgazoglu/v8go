@@ -465,6 +465,18 @@ func (i *Isolate) PumpMessageLoop() bool {
 	return C.IsolatePumpMessageLoop(i.ptr) != 0
 }
 
+// EnteredOrMicrotaskContextRef is the Ref of the context whose code is
+// running: the one the embedder last entered, or, inside a microtask, the
+// context the microtask belongs to. Called from a callback it names the realm
+// that started the call chain, which the callee's own context cannot: a
+// function of another realm runs in that realm. 0 when no context is entered.
+func (i *Isolate) EnteredOrMicrotaskContextRef() int {
+	if i.ptr == nil {
+		return 0
+	}
+	return int(C.IsolateEnteredOrMicrotaskContextRef(i.ptr))
+}
+
 // LowMemoryNotification asks V8 for a full garbage collection now — a
 // Mark-Compact, the answer to a low-memory signal. It is what a test that
 // asserts something was collected needs, without --expose-gc and its `gc`

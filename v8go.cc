@@ -2885,6 +2885,27 @@ void SetFlags(const char* flags) {
   V8::SetFlagsFromString(flags);
 }
 
+// The ref of the context the embedder last entered, or of the context a
+// running microtask belongs to -- whose code is running, as the embedder
+// sees it, including after an `await`, where nothing the embedder entered is
+// on the stack any more. 0 with no context entered, or for a context v8go
+// did not make.
+int IsolateEnteredOrMicrotaskContextRef(IsolatePtr iso) {
+  ISOLATE_SCOPE(iso);
+  if (!iso->InContext()) {
+    return 0;
+  }
+  Local<Context> context = iso->GetEnteredOrMicrotaskContext();
+  if (context.IsEmpty()) {
+    return 0;
+  }
+  Local<Value> ref_val = context->GetEmbedderData(1);
+  if (ref_val.IsEmpty() || !ref_val->IsInt32()) {
+    return 0;
+  }
+  return ref_val.As<Integer>()->Value();
+}
+
 // Runs one foreground task the platform holds for this isolate, if any:
 // what V8's own background work — asynchronous WebAssembly compilation,
 // streaming, GC finalisation callbacks — posts back to the isolate's thread.

@@ -818,6 +818,51 @@ func (b *BackingStore) Release() {
 	b.ptr = nil
 }
 
+// CompiledWasmModule is the compiled code behind a WebAssembly.Module, held
+// apart from any context until Release. A module object in another context or
+// isolate can be built over it (NewWasmModuleObjectFromCompiled), sharing the
+// code rather than compiling it again: that is how a module is posted.
+type CompiledWasmModule struct {
+	ptr C.CompiledWasmModulePtr
+}
+
+// WasmCompiledModule is the compiled module behind a WebAssembly.Module value.
+// The caller owns the returned reference and must Release it.
+func (v *Value) WasmCompiledModule() (*CompiledWasmModule, error) {
+	if !v.IsWasmModuleObject() {
+		return nil, errors.New("v8go: value is not a WebAssembly.Module")
+	}
+	ptr := C.WasmModuleObjectGetCompiledModule(v.ptr)
+	if ptr == nil {
+		return nil, errors.New("v8go: value is not a WebAssembly.Module")
+	}
+	return &CompiledWasmModule{ptr: ptr}, nil
+}
+
+// Release drops this reference. The code lives on while any module object
+// over it does.
+func (m *CompiledWasmModule) Release() {
+	if m == nil || m.ptr == nil {
+		return
+	}
+	C.CompiledWasmModuleRelease(m.ptr)
+	m.ptr = nil
+}
+
+// NewWasmModuleObjectFromCompiled creates a WebAssembly.Module in ctx over an
+// already compiled module: an object of ctx's own realm, whose prototype is
+// that realm's WebAssembly.Module.prototype.
+func NewWasmModuleObjectFromCompiled(ctx *Context, m *CompiledWasmModule) (*Value, error) {
+	if ctx == nil || m == nil || m.ptr == nil {
+		return nil, errors.New("v8go: no compiled module")
+	}
+	ptr := C.NewWasmModuleObjectFromCompiled(ctx.ptr, m.ptr)
+	if ptr == nil {
+		return nil, errors.New("v8go: the module could not be created")
+	}
+	return &Value{ptr: ptr, ctx: ctx}, nil
+}
+
 // NewSharedArrayBufferFromBackingStore creates a SharedArrayBuffer in ctx over
 // an existing backing store, sharing its bytes with every other buffer over
 // the same store, in any isolate.

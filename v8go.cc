@@ -2980,6 +2980,48 @@ ValuePtr NewSharedArrayBufferFromBackingStore(ContextPtr ctx, BackingStorePtr st
   return tracked_value(ctx, val);
 }
 
+/********** WebAssembly.Module ***********/
+
+// A compiled module held apart from any context: the code a
+// WebAssembly.Module stands for, which a module object in another context --
+// or another isolate -- can be built over without compiling again. That is
+// what posting a module means; a clone of the object would be a copy of
+// nothing, since its state is not in its properties.
+struct v8CompiledWasmModule {
+  explicit v8CompiledWasmModule(CompiledWasmModule&& compiled)
+      : module{std::move(compiled)} {}
+  CompiledWasmModule module;
+};
+
+CompiledWasmModulePtr WasmModuleObjectGetCompiledModule(ValuePtr ptr) {
+  LOCAL_VALUE(ptr);
+  if (!value->IsWasmModuleObject()) {
+    return nullptr;
+  }
+  return new v8CompiledWasmModule(
+      value.As<WasmModuleObject>()->GetCompiledModule());
+}
+
+ValuePtr NewWasmModuleObjectFromCompiled(ContextPtr ctx,
+                                         CompiledWasmModulePtr mod) {
+  LOCAL_CONTEXT(ctx);
+  Local<WasmModuleObject> module;
+  if (!WasmModuleObject::FromCompiledModule(iso, mod->module)
+           .ToLocal(&module)) {
+    return nullptr;
+  }
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, module);
+  return tracked_value(ctx, val);
+}
+
+void CompiledWasmModuleRelease(CompiledWasmModulePtr mod) {
+  delete mod;
+}
+
 /********** Weak handles **********/
 
 // A weak m_value: V8 may collect the object once nothing in JS reaches it,

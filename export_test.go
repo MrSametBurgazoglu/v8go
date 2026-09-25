@@ -17,11 +17,6 @@ func (i *Isolate) GetCallback(ref int) FunctionCallback {
 // GetContext is exported for testing only.
 var GetContext = getContext
 
-// Ref is exported for testing only.
-func (c *Context) Ref() int {
-	return c.ref
-}
-
 // LiveExternalStringPins returns the current count of []byte slices pinned
 // behind live external one-byte strings. Exported for testing the lifetime
 // of GoExternalOneByteResource against V8 GC and Isolate::Dispose.

@@ -38,6 +38,8 @@ typedef const v8ScriptCompilerCachedData* ScriptCompilerCachedDataPtr;
 // Opaque to both C and C++
 typedef struct v8BackingStore v8BackingStore;
 typedef v8BackingStore* BackingStorePtr;
+typedef struct v8CompiledWasmModule v8CompiledWasmModule;
+typedef v8CompiledWasmModule* CompiledWasmModulePtr;
 
 #include <stddef.h>
 #include <stdint.h>
@@ -523,6 +525,10 @@ extern BackingStorePtr SharedArrayBufferGetBackingStore(ValuePtr ptr);
 extern BackingStorePtr ArrayBufferGetBackingStore(ValuePtr ptr);
 extern BackingStorePtr TypedArrayGetBuffer(ValuePtr ptr);
 extern ValuePtr NewSharedArrayBufferFromBackingStore(ContextPtr ctx, BackingStorePtr store);
+extern CompiledWasmModulePtr WasmModuleObjectGetCompiledModule(ValuePtr ptr);
+extern ValuePtr NewWasmModuleObjectFromCompiled(ContextPtr ctx,
+                                                CompiledWasmModulePtr mod);
+extern void CompiledWasmModuleRelease(CompiledWasmModulePtr mod);
 extern size_t TypedArrayByteOffset(ValuePtr ptr);
 extern size_t TypedArrayByteLength(ValuePtr ptr);
 extern void BackingStoreRelease(BackingStorePtr ptr);

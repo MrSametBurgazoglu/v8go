@@ -257,14 +257,51 @@ func (i *Isolate) SetPromiseRejectCallback(cb func(event PromiseRejectEvent, rej
 	C.IsolateSetPromiseRejectCallback(i.ptr)
 }
 
+// PromiseRejectMessage is one promise-reject event with everything V8 says
+// about it. Promise and Value are ONLY valid for the duration of the
+// callback, like SetPromiseRejectCallback's value: pass them to script, or
+// read them, but do not retain them. Value is undefined for
+// PromiseHandlerAddedAfterReject, for which V8 reports none. Context is the
+// context the promise was created in, or nil when v8go did not make it.
+type PromiseRejectMessage struct {
+	Event   PromiseRejectEvent
+	Promise *Value
+	Value   *Value
+	Context *Context
+}
+
+// SetPromiseRejectHandler is SetPromiseRejectCallback with the promise and
+// its creation context: enough for an embedder to track rejected promises
+// per realm the way the HTML standard's "notify about rejected promises"
+// does. It replaces any callback either method registered before.
+func (i *Isolate) SetPromiseRejectHandler(cb func(PromiseRejectMessage)) {
+	if i.ptr == nil {
+		return
+	}
+	promiseRejectCallbacks.Store(i.ptr, cb)
+	C.IsolateSetPromiseRejectCallback(i.ptr)
+}
+
 //export goPromiseRejectCallback
-func goPromiseRejectCallback(iso C.IsolatePtr, event C.int, val C.ValuePtr) {
+func goPromiseRejectCallback(iso C.IsolatePtr, event C.int, val C.ValuePtr, promise C.ValuePtr, ctxRef C.int) {
 	v, ok := promiseRejectCallbacks.Load(iso)
 	if !ok {
 		return
 	}
-	cb := v.(func(PromiseRejectEvent, *Value))
-	cb(PromiseRejectEvent(event), &Value{ptr: val})
+	switch cb := v.(type) {
+	case func(PromiseRejectEvent, *Value):
+		cb(PromiseRejectEvent(event), &Value{ptr: val})
+	case func(PromiseRejectMessage):
+		msg := PromiseRejectMessage{
+			Event:   PromiseRejectEvent(event),
+			Promise: &Value{ptr: promise},
+			Value:   &Value{ptr: val},
+		}
+		if ctxRef != 0 {
+			msg.Context = getContext(int(ctxRef))
+		}
+		cb(msg)
+	}
 }
 
 // TerminateExecution terminates forcefully the current thread

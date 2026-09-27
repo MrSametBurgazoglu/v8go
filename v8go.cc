@@ -377,16 +377,46 @@ void promiseRejectTrampoline(PromiseRejectMessage msg) {
   Local<Context> local_ctx = ctx->ptr.Get(iso);
   Context::Scope context_scope(local_ctx);
 
+  // V8 gives no value for kPromiseHandlerAddedAfterReject; undefined stands
+  // in, so a callback may read it without meeting an empty handle.
+  Local<Value> reason = msg.GetValue();
+  if (reason.IsEmpty()) {
+    reason = Undefined(iso);
+  }
   m_value* val = new m_value;
   val->id = 0;
   val->iso = iso;
   val->ctx = ctx;
-  val->ptr = Global<Value>(iso, msg.GetValue());
+  val->ptr = Global<Value>(iso, reason);
 
-  goPromiseRejectCallback(iso, static_cast<int>(msg.GetEvent()), val);
+  // The promise itself, transient like the value, and the ref of the context
+  // it was created in (0 when that is not a context v8go made): what an
+  // embedder needs to keep the HTML standard's per-global lists of rejected
+  // promises, and to fire unhandledrejection/rejectionhandled with the
+  // promise the page holds rather than a description of it.
+  Local<Promise> promise = msg.GetPromise();
+  m_value* prom = new m_value;
+  prom->id = 0;
+  prom->iso = iso;
+  prom->ctx = ctx;
+  prom->ptr = Global<Value>(iso, promise);
+  int ctx_ref = 0;
+  Local<Context> creation;
+  if (!promise.IsEmpty() &&
+      promise->GetCreationContext(iso).ToLocal(&creation)) {
+    Local<Value> ref_val = creation->GetEmbedderData(1);
+    if (!ref_val.IsEmpty() && ref_val->IsInt32()) {
+      ctx_ref = ref_val.As<Integer>()->Value();
+    }
+  }
+
+  goPromiseRejectCallback(iso, static_cast<int>(msg.GetEvent()), val, prom,
+                          ctx_ref);
 
   val->ptr.Reset();
   delete val;
+  prom->ptr.Reset();
+  delete prom;
 }
 
 void IsolateSetPromiseRejectCallback(IsolatePtr iso) {

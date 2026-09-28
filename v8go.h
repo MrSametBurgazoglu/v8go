@@ -356,21 +356,26 @@ extern TemplatePtr NewFastFunctionTemplate(IsolatePtr iso_ptr,
 // ObjectTemplateNewWrapper is NewInstance, SetInternalField(0, field),
 // SetPrototype(proto) and n own properties keyed by the given handles, in one
 // crossing: what a DOM wrapper costs to make. proto and the keys and values
-// are borrowed.
+// are borrowed. With weak, the handle is born weak and releasing (see
+// ValuesSetWeak).
 extern RtnValue ObjectTemplateNewWrapper(TemplatePtr ptr,
                                          ContextPtr ctx_ptr,
                                          int32_t field,
                                          ValuePtr proto,
                                          int n,
                                          ValuePtr* keys,
-                                         ValuePtr* vals);
+                                         ValuePtr* vals,
+                                         int weak);
 
 // NewArrayOfValues builds a JS array of the given borrowed handles, holes for
 // the null ones, in one crossing.
 extern RtnValue NewArrayOfValues(ContextPtr ctx_ptr, int n, ValuePtr* vals);
 
-// ValuesSetWeak is ValueSetWeak for n handles in one crossing.
-extern void ValuesSetWeak(int n, ValuePtr* ptrs);
+// ValuesSetWeak is ValueSetWeak for n handles in one crossing. With
+// releasing, each handle is freed after its collection is reported, and the
+// Go side must not release it.
+extern void ValuesSetWeak(int n, ValuePtr* ptrs, int releasing);
+extern void ValueSetWeakReleasing(ValuePtr ptr);
 extern RtnValue FunctionTemplateGetFunction(TemplatePtr ptr,
                                             ContextPtr ctx_ptr);
 // Like TemplateSetValue, but targets the FunctionTemplate's prototype so

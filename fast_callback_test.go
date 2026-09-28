@@ -177,6 +177,35 @@ func TestNewWrapperSetsPrototypeAndProperties(t *testing.T) {
 	}
 }
 
+func TestNewWeakWrapperIsCollected(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+	ctx := v8.NewContext(iso)
+	defer ctx.Close()
+	tmpl := v8.NewObjectTemplate(iso)
+	tmpl.SetInternalFieldCount(1)
+	collected := 0
+	held, err := tmpl.NewWeakWrapper(ctx, 1, nil, func() { collected += 10 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := ctx.Global()
+	_ = g.Set("held", held)
+	if _, err := tmpl.NewWeakWrapper(ctx, 2, nil, func() { collected++ }); err != nil {
+		t.Fatal(err)
+	}
+	if !held.IsWeak() {
+		t.Error("born weak, but IsWeak says no")
+	}
+	iso.LowMemoryNotification()
+	if collected != 1 {
+		t.Errorf("collected %d, want the unheld one only", collected)
+	}
+	if v := run(t, ctx, `typeof held`).String(); v != "object" {
+		t.Errorf("held is %s", v)
+	}
+}
+
 func TestNewArrayOf(t *testing.T) {
 	iso := v8.NewIsolate()
 	defer iso.Dispose()
@@ -227,6 +256,29 @@ func TestSetWeakAllCollects(t *testing.T) {
 	if collected != 3 {
 		t.Errorf("collected %d of 3", collected)
 	}
+}
+
+func TestSetWeakAllReleasingFreesTheHandle(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+	ctx := v8.NewContext(iso)
+	defer ctx.Close()
+	collected := 0
+	var vals []*v8.Value
+	var fns []func()
+	for i := 0; i < 3; i++ {
+		vals = append(vals, run(t, ctx, `({big: new Array(1000).fill(1)})`))
+		fns = append(fns, func() { collected++ })
+	}
+	// One taken back before the collection: it survives and stays ours.
+	kept := run(t, ctx, `globalThis.keep = {k: 1}; keep`)
+	v8.SetWeakAllReleasing(append(vals, kept), append(fns, func() { collected += 100 }))
+	kept.ClearWeak()
+	iso.LowMemoryNotification()
+	if collected != 3 {
+		t.Errorf("collected %d, want 3", collected)
+	}
+	kept.Release()
 }
 
 func TestFastTemplateRelease(t *testing.T) {

@@ -1238,6 +1238,9 @@ TemplatePtr FunctionTemplatePrototypeSetMethod(TemplatePtr ptr,
 
 /********** Fast callbacks **********/
 
+static void weakValueCallback(const WeakCallbackInfo<m_value>& info);
+static void weakValueReleasingCallback(const WeakCallbackInfo<m_value>& info);
+
 // The template's data is one Number: the callback reference times 2^16 plus
 // the spec, two bits an argument ('v' = 1, 's' = 2), so a call reads both
 // with one load. A double holds a reference up to 2^37, and a reference is a
@@ -1447,7 +1450,8 @@ RtnValue ObjectTemplateNewWrapper(TemplatePtr ptr,
                                   ValuePtr proto,
                                   int n,
                                   ValuePtr* keys,
-                                  ValuePtr* vals) {
+                                  ValuePtr* vals,
+                                  int weak) {
   LOCAL_TEMPLATE(ptr);
   TryCatch try_catch(iso);
   Local<Context> local_ctx = ctx->ptr.Get(iso);
@@ -1487,6 +1491,10 @@ RtnValue ObjectTemplateNewWrapper(TemplatePtr ptr,
   val->ctx = ctx;
   val->ptr = Global<Value>(iso, obj);
   rtn.value = tracked_value(ctx, val);
+  if (weak) {
+    val->ptr.SetWeak(val, weakValueReleasingCallback,
+                     WeakCallbackType::kParameter);
+  }
   return rtn;
 }
 
@@ -1516,9 +1524,42 @@ RtnValue NewArrayOfValues(ContextPtr ctx, int n, ValuePtr* vals) {
   return rtn;
 }
 
-void ValuesSetWeak(int n, ValuePtr* ptrs) {
+// weakValueReleasingCallback is weakValueCallback for a handle the Go side
+// handed over entirely: once Go has heard of the collection, the handle is
+// freed here rather than by a Release crossing back.
+static void weakValueReleasingCallback(const WeakCallbackInfo<m_value>& info) {
+  m_value* val = info.GetParameter();
+  if (val == nullptr) {
+    return;
+  }
+  val->ptr.Reset();
+  goWeakCallback(static_cast<void*>(val));
+  if (val->id != 0 && val->ctx != nullptr) {
+    val->ctx->vals.erase(val->id);
+  }
+  delete val;
+}
+
+void ValueSetWeakReleasing(ValuePtr ptr) {
+  if (ptr == nullptr || ptr->ptr.IsEmpty()) {
+    return;
+  }
+  ptr->ptr.SetWeak(ptr, weakValueReleasingCallback,
+                   WeakCallbackType::kParameter);
+}
+
+void ValuesSetWeak(int n, ValuePtr* ptrs, int releasing) {
   for (int i = 0; i < n; i++) {
-    ValueSetWeak(ptrs[i]);
+    ValuePtr ptr = ptrs[i];
+    if (ptr == nullptr || ptr->ptr.IsEmpty()) {
+      continue;
+    }
+    if (releasing) {
+      ptr->ptr.SetWeak(ptr, weakValueReleasingCallback,
+                       WeakCallbackType::kParameter);
+    } else {
+      ptr->ptr.SetWeak(ptr, weakValueCallback, WeakCallbackType::kParameter);
+    }
   }
 }
 

@@ -280,6 +280,19 @@ func goFastCallback(ctxref C.int, cbref C.int, field0 C.int64_t, argc C.int, arg
 // property per key/value pair — the whole of making a DOM wrapper, in one
 // crossing. proto, keys and vals are borrowed.
 func (o *ObjectTemplate) NewWrapper(ctx *Context, field int32, proto *Value, keys, vals []*Value) (*Object, error) {
+	return o.newWrapper(ctx, field, proto, keys, vals, nil)
+}
+
+// NewWeakWrapper is NewWrapper with the handle born weak and releasing, as
+// SetWeakReleasing would leave it, without the second crossing. The caller
+// must hand the object to script before anything can run a collection — in
+// practice, return it from the callback that made it — or the collection can
+// free the handle under it.
+func (o *ObjectTemplate) NewWeakWrapper(ctx *Context, field int32, proto *Value, onCollected func()) (*Object, error) {
+	return o.newWrapper(ctx, field, proto, nil, nil, onCollected)
+}
+
+func (o *ObjectTemplate) newWrapper(ctx *Context, field int32, proto *Value, keys, vals []*Value, onCollected func()) (*Object, error) {
 	if len(keys) != len(vals) {
 		panic("v8go: NewWrapper needs a value per key")
 	}
@@ -307,7 +320,11 @@ func (o *ObjectTemplate) NewWrapper(ctx *Context, field int32, proto *Value, key
 		}
 		kp, vp = &ks[0], &vs[0]
 	}
-	rtn := C.ObjectTemplateNewWrapper(o.ptr, ctx.ptr, C.int32_t(field), protoPtr, C.int(n), kp, vp)
+	weak := C.int(0)
+	if onCollected != nil {
+		weak = 1
+	}
+	rtn := C.ObjectTemplateNewWrapper(o.ptr, ctx.ptr, C.int32_t(field), protoPtr, C.int(n), kp, vp, weak)
 	runtime.KeepAlive(o)
 	runtime.KeepAlive(proto)
 	runtime.KeepAlive(keys)
@@ -315,6 +332,13 @@ func (o *ObjectTemplate) NewWrapper(ctx *Context, field int32, proto *Value, key
 	val, err := valueResult(ctx, rtn)
 	if err != nil {
 		return nil, err
+	}
+	if onCollected != nil {
+		// No V8 work happens between the handle going weak and this, so the
+		// callback is filed before any collection can want it.
+		weakHandlers.Lock()
+		weakHandlers.byPtr[unsafe.Pointer(val.ptr)] = onCollected
+		weakHandlers.Unlock()
 	}
 	return &Object{val}, nil
 }
@@ -348,6 +372,29 @@ func NewArrayOf(ctx *Context, vals []*Value) (*Value, error) {
 // SetWeakAll is SetWeak for several handles in one crossing, each with its
 // own callback.
 func SetWeakAll(vals []*Value, onCollected []func()) {
+	setWeakAll(vals, onCollected, false)
+}
+
+// SetWeakAllReleasing is SetWeakAll for handles the caller gives up: each
+// one is freed once its callback has run, so the callback must not Release
+// it — the Release crossing is the one this saves. ClearWeak takes a handle
+// back as usual, and a handle taken back is the caller's to release again.
+func SetWeakAllReleasing(vals []*Value, onCollected []func()) {
+	setWeakAll(vals, onCollected, true)
+}
+
+// SetWeakReleasing is SetWeakAllReleasing for one handle.
+func (v *Value) SetWeakReleasing(onCollected func()) {
+	if v == nil || v.ptr == nil || onCollected == nil {
+		return
+	}
+	weakHandlers.Lock()
+	weakHandlers.byPtr[unsafe.Pointer(v.ptr)] = onCollected
+	weakHandlers.Unlock()
+	C.ValueSetWeakReleasing(v.ptr)
+}
+
+func setWeakAll(vals []*Value, onCollected []func(), releasing bool) {
 	if len(vals) != len(onCollected) {
 		panic("v8go: SetWeakAll needs a callback per value")
 	}
@@ -364,6 +411,10 @@ func SetWeakAll(vals []*Value, onCollected []func()) {
 	if len(ptrs) == 0 {
 		return
 	}
-	C.ValuesSetWeak(C.int(len(ptrs)), &ptrs[0])
+	r := C.int(0)
+	if releasing {
+		r = 1
+	}
+	C.ValuesSetWeak(C.int(len(ptrs)), &ptrs[0], r)
 	runtime.KeepAlive(vals)
 }

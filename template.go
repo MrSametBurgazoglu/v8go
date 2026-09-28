@@ -24,6 +24,11 @@ type template struct {
 	// unregisters them all.
 	cbref  int
 	cbrefs []int
+	// function says the template is a FunctionTemplate. replayed says it
+	// is a snapshot's, shared by every runtime on the isolate and already
+	// built: it is neither mutated nor released through this handle.
+	function bool
+	replayed bool
 }
 
 // Release frees the template now, on a thread that owns the isolate: the
@@ -38,6 +43,10 @@ type template struct {
 // FunctionTemplate that is still reachable answers undefined when called.
 func (t *template) Release() {
 	if t == nil || t.ptr == nil {
+		return
+	}
+	if t.replayed {
+		t.ptr = nil
 		return
 	}
 	runtime.SetFinalizer(t, nil)
@@ -63,6 +72,9 @@ func (t *template) Release() {
 // If the value passed is a Go supported primitive (string, int32, uint32, int64, uint64, float64, big.Int)
 // then a value will be created and set as the value property.
 func (t *template) Set(name string, val interface{}, attributes ...PropertyAttribute) error {
+	if t.replayed {
+		return nil
+	}
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
 
@@ -127,6 +139,9 @@ func (t *template) SetPrivate(name string, val interface{}, attributes ...Proper
 }
 
 func (t *template) finalizer() {
+	if t.replayed {
+		return
+	}
 	// Using v8::PersistentBase::Reset() wouldn't be thread-safe to do from
 	// this finalizer goroutine so just free the wrapper and let the template
 	// itself get cleaned up when the isolate is disposed.
@@ -150,7 +165,7 @@ func (t *template) SetAccessorProperty(name string, getter, setter *FunctionTemp
 	// them: an accessor outlives the FunctionTemplate the caller built it
 	// from, and unregistering the callback under a live accessor is a getter
 	// that answers undefined.
-	getterRef, setterRef := C.int(-1), C.int(-1)
+	getterRef, setterRef := C.int(noCallback), C.int(noCallback)
 	if getter != nil {
 		getterRef = C.int(getter.cbref)
 		t.cbrefs = append(t.cbrefs, getter.cbref)
@@ -158,6 +173,9 @@ func (t *template) SetAccessorProperty(name string, getter, setter *FunctionTemp
 	if setter != nil {
 		setterRef = C.int(setter.cbref)
 		t.cbrefs = append(t.cbrefs, setter.cbref)
+	}
+	if t.replayed {
+		return
 	}
 	C.TemplateSetAccessorProperty(t.ptr, cname, getterRef, setterRef, C.int(attributes))
 	runtime.KeepAlive(t)
@@ -172,6 +190,9 @@ func (t *template) SetAccessorProperty(name string, getter, setter *FunctionTemp
 // "[object Object]" to Object.prototype.toString, which is how a great deal of
 // library code decides what it has been handed.
 func (t *template) SetSymbolValue(symbol string, value *Value, attributes PropertyAttribute) {
+	if t.replayed {
+		return
+	}
 	csymbol := C.CString(symbol)
 	defer C.free(unsafe.Pointer(csymbol))
 	C.TemplateSetSymbolValue(t.ptr, csymbol, value.ptr, C.int(attributes))

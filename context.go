@@ -31,6 +31,9 @@ type Context struct {
 	ref int
 	ptr C.ContextPtr
 	iso *Isolate
+	// callbacks is the table the context's snapshot templates call into
+	// (snapshot.go); nil for a context that has none.
+	callbacks *CallbackTable
 }
 
 type contextOptions struct {

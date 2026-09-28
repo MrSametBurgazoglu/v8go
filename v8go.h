@@ -732,6 +732,18 @@ extern void InspectorSessionDispose(InspectorSessionPtr session);
 // PumpPlatformTasks drains the platform foreground task queue for iso.
 extern void PumpPlatformTasks(IsolatePtr iso);
 
+
+extern IsolatePtr NewSnapshotCreatorIsolate();
+extern int SnapshotCreatorAddTemplate(IsolatePtr iso, TemplatePtr tmpl);
+extern int SnapshotCreatorAddContext(IsolatePtr iso, ContextPtr ctx);
+extern char* SnapshotCreatorCreateBlob(IsolatePtr iso, int* size);
+extern IsolatePtr NewIsolateFromSnapshot(const char* data, int size);
+extern TemplatePtr IsolateSnapshotTemplate(IsolatePtr iso, int index, int function);
+extern ContextPtr NewContextFromSnapshot(IsolatePtr iso,
+                                         int index,
+                                         int ref,
+                                         int adopt_from);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

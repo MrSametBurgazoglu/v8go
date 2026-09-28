@@ -1571,6 +1571,11 @@ void ObjectTemplateSetCallAsFunctionHandler(TemplatePtr ptr, int callback_ref) {
 // chosen outside the int32 range so no real field value collides with it.
 static const int64_t kNoInternalField = -(int64_t(1) << 40);
 
+// kNoCallback is the callback reference that means "none". Not -1: a
+// negative reference is a callback table's (snapshot.go), and -1 is its
+// first entry. Must match noCallback in snapshot.go.
+static const int kNoCallback = std::numeric_limits<int>::min();
+
 static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
   Isolate* iso = info.GetIsolate();
   ISOLATE_SCOPE(iso);
@@ -1894,8 +1899,15 @@ static void FastFunctionTemplateCallback(
   int ctx_ref = ref_val.As<Integer>()->Value();
 
   double data = info.Data().As<Number>()->Value();
-  int callback_ref = static_cast<int>(data / kFastSpecRadix);
-  int spec = static_cast<int>(data - callback_ref * kFastSpecRadix);
+  // A negative reference (a callback table's, see snapshot.go) is encoded
+  // as the negated whole, so the spec bits survive the sign.
+  bool table = data < 0;
+  double whole = table ? -data : data;
+  int callback_ref = static_cast<int>(whole / kFastSpecRadix);
+  int spec = static_cast<int>(whole - callback_ref * kFastSpecRadix);
+  if (table) {
+    callback_ref = -callback_ref;
+  }
 
   int64_t this_field0 = kNoInternalField;
   {
@@ -1992,8 +2004,10 @@ TemplatePtr NewFastFunctionTemplate(IsolatePtr iso,
   Isolate::Scope isolate_scope(iso);
   HandleScope handle_scope(iso);
 
-  Local<Number> cbData = Number::New(
-      iso, callback_ref * kFastSpecRadix + fastSpecBits(spec));
+  double whole = (callback_ref < 0 ? -callback_ref : callback_ref) *
+                     kFastSpecRadix +
+                 fastSpecBits(spec);
+  Local<Number> cbData = Number::New(iso, callback_ref < 0 ? -whole : whole);
   m_template* ot = new m_template;
   ot->iso = iso;
   ot->ptr = new Persistent<Template>(
@@ -2203,12 +2217,12 @@ void TemplateSetAccessorProperty(TemplatePtr ptr,
       String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
 
   Local<FunctionTemplate> getter;
-  if (getter_ref >= 0) {
+  if (getter_ref != kNoCallback) {
     getter = FunctionTemplate::New(iso, FunctionTemplateCallback,
                                    Integer::New(iso, getter_ref));
   }
   Local<FunctionTemplate> setter;
-  if (setter_ref >= 0) {
+  if (setter_ref != kNoCallback) {
     setter = FunctionTemplate::New(iso, FunctionTemplateCallback,
                                    Integer::New(iso, setter_ref));
   }
@@ -2481,12 +2495,12 @@ void ObjectTemplateSetNamedPropertyHandler(TemplatePtr ptr,
   (void)query_ref;
   (void)deleter_ref;
 
-  if (getter_ref < 0) {
+  if (getter_ref == kNoCallback) {
     return;
   }
   NamedPropertyHandlerConfiguration config(
       namedGetter, nullptr, nullptr, nullptr,
-      enumerator_ref >= 0 ? namedEnumerator : nullptr,
+      enumerator_ref != kNoCallback ? namedEnumerator : nullptr,
       Integer::New(iso, getter_ref), handlerFlags(flags));
   obj_tmpl->SetHandler(config);
 }
@@ -2505,7 +2519,7 @@ void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
   (void)deleter_ref;
   (void)enumerator_ref;
 
-  if (getter_ref < 0) {
+  if (getter_ref == kNoCallback) {
     return;
   }
   IndexedPropertyHandlerConfiguration config(
@@ -4992,3 +5006,173 @@ void InspectorSessionDispose(InspectorSessionPtr s) {
 }
 
 }  // extern "C"
+
+/********** Startup snapshots **********/
+
+// Every native function a snapshotted template can point at. V8 serialises a
+// function pointer as its index in this list, so the list is the same for the
+// creator and for every isolate made from its blob, and it is terminated by
+// a zero.
+static intptr_t* snapshotExternalReferences() {
+  static intptr_t refs[] = {
+      reinterpret_cast<intptr_t>(FunctionTemplateCallback),
+      reinterpret_cast<intptr_t>(FastFunctionTemplateCallback),
+      reinterpret_cast<intptr_t>(namedGetter),
+      reinterpret_cast<intptr_t>(namedEnumerator),
+      reinterpret_cast<intptr_t>(indexedGetter),
+      0};
+  return refs;
+}
+
+static std::unordered_map<Isolate*, SnapshotCreator*>& snapshotCreators() {
+  static std::unordered_map<Isolate*, SnapshotCreator*> creators;
+  return creators;
+}
+
+IsolatePtr NewSnapshotCreatorIsolate() {
+  Isolate::CreateParams params;
+  params.array_buffer_allocator = default_allocator;
+  params.external_references = snapshotExternalReferences();
+  SnapshotCreator* creator = new SnapshotCreator(params);
+  Isolate* iso = creator->GetIsolate();
+  snapshotCreators()[iso] = creator;
+  finishIsolateInit(iso);
+  return iso;
+}
+
+int SnapshotCreatorAddTemplate(IsolatePtr iso, TemplatePtr tmpl) {
+  auto it = snapshotCreators().find(iso);
+  if (it == snapshotCreators().end() || tmpl == nullptr) {
+    return -1;
+  }
+  Locker locker(iso);
+  HandleScope handle_scope(iso);
+  return static_cast<int>(it->second->AddData(tmpl->ptr->Get(iso)));
+}
+
+int SnapshotCreatorAddContext(IsolatePtr iso, ContextPtr ctx) {
+  auto it = snapshotCreators().find(iso);
+  if (it == snapshotCreators().end() || ctx == nullptr) {
+    return -1;
+  }
+  Locker locker(iso);
+  HandleScope handle_scope(iso);
+  return static_cast<int>(it->second->AddContext(ctx->ptr.Get(iso)));
+}
+
+// SnapshotCreatorCreateBlob cuts the blob and disposes of the creator and its
+// isolate. The caller has released every handle it holds; the isolate's own
+// internal context and any parked global proxy of this isolate go here. The
+// bytes are malloc'd and the caller frees them.
+char* SnapshotCreatorCreateBlob(IsolatePtr iso, int* size) {
+  auto it = snapshotCreators().find(iso);
+  if (it == snapshotCreators().end()) {
+    return nullptr;
+  }
+  SnapshotCreator* creator = it->second;
+  snapshotCreators().erase(it);
+  StartupData blob;
+  {
+    Locker locker(iso);
+    {
+      HandleScope handle_scope(iso);
+      m_ctx* internal = isolateInternalContext(iso);
+      iso->SetData(0, nullptr);
+      ContextFree(internal);
+      auto& kept = keptGlobals();
+      for (auto k = kept.begin(); k != kept.end();) {
+        k->second.Reset();
+        k = kept.erase(k);
+      }
+      // V8 wants a default context; an empty one keeps Context::New on the
+      // snapshot's isolates what it always was.
+      creator->SetDefaultContext(Context::New(iso));
+    }
+    blob = creator->CreateBlob(SnapshotCreator::FunctionCodeHandling::kKeep);
+  }
+  delete creator;
+  if (blob.data == nullptr) {
+    return nullptr;
+  }
+  char* out = static_cast<char*>(malloc(blob.raw_size));
+  memcpy(out, blob.data, blob.raw_size);
+  *size = blob.raw_size;
+  delete[] blob.data;
+  return out;
+}
+
+// NewIsolateFromSnapshot makes an isolate over a blob, which it copies and
+// keeps for its life.
+IsolatePtr NewIsolateFromSnapshot(const char* data, int size) {
+  StartupData* blob = new StartupData;
+  char* copy = new char[size];
+  memcpy(copy, data, size);
+  blob->data = copy;
+  blob->raw_size = size;
+  Isolate::CreateParams params;
+  params.array_buffer_allocator = default_allocator;
+  params.snapshot_blob = blob;
+  params.external_references = snapshotExternalReferences();
+  Isolate* iso = Isolate::New(params);
+  finishIsolateInit(iso);
+  return iso;
+}
+
+// IsolateSnapshotTemplate takes template index out of the snapshot. V8 hands
+// each one out once; the caller keeps the handle for the isolate's life.
+TemplatePtr IsolateSnapshotTemplate(IsolatePtr iso, int index, int function) {
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  Local<Template> tmpl;
+  if (function) {
+    Local<FunctionTemplate> fn;
+    if (!iso->GetDataFromSnapshotOnce<FunctionTemplate>(index).ToLocal(&fn)) {
+      return nullptr;
+    }
+    tmpl = fn;
+  } else {
+    Local<ObjectTemplate> obj;
+    if (!iso->GetDataFromSnapshotOnce<ObjectTemplate>(index).ToLocal(&obj)) {
+      return nullptr;
+    }
+    tmpl = obj;
+  }
+  m_template* ot = new m_template;
+  ot->iso = iso;
+  ot->ptr = new Persistent<Template>(iso, tmpl);
+  return ot;
+}
+
+// NewContextFromSnapshot deserialises context index around the global proxy
+// parked under adopt_from, when there is one.
+ContextPtr NewContextFromSnapshot(IsolatePtr iso,
+                                  int index,
+                                  int ref,
+                                  int adopt_from) {
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+
+  MaybeLocal<Value> global_object;
+  auto& kept = keptGlobals();
+  auto it = kept.find(adopt_from);
+  if (it != kept.end()) {
+    if (!it->second.IsEmpty()) {
+      global_object = MaybeLocal<Value>(it->second.Get(iso));
+    }
+    it->second.Reset();
+    kept.erase(it);
+  }
+  Local<Context> local_ctx;
+  if (!Context::FromSnapshot(iso, index, DeserializeInternalFieldsCallback(),
+                             nullptr, global_object)
+           .ToLocal(&local_ctx)) {
+    return nullptr;
+  }
+  local_ctx->SetEmbedderData(1, Integer::New(iso, ref));
+  m_ctx* ctx = new m_ctx;
+  ctx->ptr.Reset(iso, local_ctx);
+  ctx->iso = iso;
+  return ctx;
+}

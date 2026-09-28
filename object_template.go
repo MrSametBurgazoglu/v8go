@@ -50,11 +50,7 @@ func NewObjectTemplate(iso *Isolate) *ObjectTemplate {
 		panic("nil Isolate argument not supported")
 	}
 
-	tmpl := &template{
-		ptr: C.NewObjectTemplate(iso.ptr),
-		iso: iso,
-	}
-	runtime.SetFinalizer(tmpl, (*template).finalizer)
+	tmpl := iso.newTemplate(func() C.TemplatePtr { return C.NewObjectTemplate(iso.ptr) }, 0, false)
 	return &ObjectTemplate{tmpl}
 }
 
@@ -72,6 +68,9 @@ func (o *ObjectTemplate) NewInstance(ctx *Context) (*Object, error) {
 // SetInternalFieldCount sets the number of internal fields that instances of this
 // template will have.
 func (o *ObjectTemplate) SetInternalFieldCount(fieldCount uint32) {
+	if o.replayed {
+		return
+	}
 	C.ObjectTemplateSetInternalFieldCount(o.ptr, C.int(fieldCount))
 }
 
@@ -96,6 +95,9 @@ func (o *ObjectTemplate) InternalFieldCount() uint32 {
 // SetCallAsFunctionHandler, which the one object that needs this wants anyway
 // (`document.all(name)` is the legacy spelling of namedItem).
 func (o *ObjectTemplate) MarkAsUndetectable() {
+	if o.replayed {
+		return
+	}
 	C.ObjectTemplateMarkAsUndetectable(o.ptr)
 	runtime.KeepAlive(o)
 }
@@ -137,8 +139,11 @@ func (o *ObjectTemplate) SetCallAsFunctionHandler(callback FunctionCallback) {
 	if callback == nil {
 		panic("nil FunctionCallback argument not supported")
 	}
-	cbref := o.iso.registerCallback(callback)
+	cbref := o.iso.registerFunction(callback)
 	o.cbrefs = append(o.cbrefs, cbref)
+	if o.replayed {
+		return
+	}
 	C.ObjectTemplateSetCallAsFunctionHandler(o.ptr, C.int(cbref))
 	runtime.KeepAlive(o)
 }
@@ -190,19 +195,22 @@ const (
 // object's own properties, which is right for [LegacyOverrideBuiltIns] and
 // wrong for everything else. See PropertyHandlerFlags.
 func (o *ObjectTemplate) SetNamedPropertyHandler(getter, enumerator FunctionCallback, flags PropertyHandlerFlags) {
-	getterRef := C.int(-1)
+	getterRef := C.int(noCallback)
 	if getter != nil {
-		ref := o.iso.registerCallback(getter)
+		ref := o.iso.registerFunction(getter)
 		o.cbrefs = append(o.cbrefs, ref)
 		getterRef = C.int(ref)
 	}
-	enumeratorRef := C.int(-1)
+	enumeratorRef := C.int(noCallback)
 	if enumerator != nil {
-		ref := o.iso.registerCallback(enumerator)
+		ref := o.iso.registerFunction(enumerator)
 		o.cbrefs = append(o.cbrefs, ref)
 		enumeratorRef = C.int(ref)
 	}
-	C.ObjectTemplateSetNamedPropertyHandler(o.ptr, getterRef, -1, -1, -1, enumeratorRef, C.int(flags))
+	if o.replayed {
+		return
+	}
+	C.ObjectTemplateSetNamedPropertyHandler(o.ptr, getterRef, noCallback, noCallback, noCallback, enumeratorRef, C.int(flags))
 	runtime.KeepAlive(o)
 }
 
@@ -212,12 +220,15 @@ func (o *ObjectTemplate) SetNamedPropertyHandler(getter, enumerator FunctionCall
 // getter is called with the index as a number. Returning nil or undefined
 // means "not mine".
 func (o *ObjectTemplate) SetIndexedPropertyHandler(getter FunctionCallback, flags PropertyHandlerFlags) {
-	getterRef := C.int(-1)
+	getterRef := C.int(noCallback)
 	if getter != nil {
-		ref := o.iso.registerCallback(getter)
+		ref := o.iso.registerFunction(getter)
 		o.cbrefs = append(o.cbrefs, ref)
 		getterRef = C.int(ref)
 	}
-	C.ObjectTemplateSetIndexedPropertyHandler(o.ptr, getterRef, -1, -1, -1, -1, C.int(flags))
+	if o.replayed {
+		return
+	}
+	C.ObjectTemplateSetIndexedPropertyHandler(o.ptr, getterRef, noCallback, noCallback, noCallback, noCallback, C.int(flags))
 	runtime.KeepAlive(o)
 }

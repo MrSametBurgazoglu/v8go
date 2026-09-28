@@ -8,6 +8,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -2523,17 +2524,18 @@ int ValueToBoolean(ValuePtr ptr) {
 
 int32_t ValueToInt32(ValuePtr ptr) {
   LOCAL_VALUE(ptr);
-  return value->Int32Value(local_ctx).ToChecked();
+  return value->Int32Value(local_ctx).FromMaybe(0);
 }
 
 int64_t ValueToInteger(ValuePtr ptr) {
   LOCAL_VALUE(ptr);
-  return value->IntegerValue(local_ctx).ToChecked();
+  return value->IntegerValue(local_ctx).FromMaybe(0);
 }
 
 double ValueToNumber(ValuePtr ptr) {
   LOCAL_VALUE(ptr);
-  return value->NumberValue(local_ctx).ToChecked();
+  return value->NumberValue(local_ctx).FromMaybe(
+      std::numeric_limits<double>::quiet_NaN());
 }
 
 RtnString ValueToDetailString(ValuePtr ptr) {
@@ -2567,7 +2569,7 @@ RtnString ValueToString(ValuePtr ptr) {
 
 uint32_t ValueToUint32(ValuePtr ptr) {
   LOCAL_VALUE(ptr);
-  return value->Uint32Value(local_ctx).ToChecked();
+  return value->Uint32Value(local_ctx).FromMaybe(0);
 }
 
 ValueBigInt ValueToBigInt(ValuePtr ptr) {
@@ -3024,24 +3026,24 @@ int ObjectHas(ValuePtr ptr, const char* key) {
   LOCAL_OBJECT(ptr);
   Local<String> key_val =
       String::NewFromUtf8(iso, key, NewStringType::kNormal).ToLocalChecked();
-  return obj->Has(local_ctx, key_val).ToChecked();
+  return obj->Has(local_ctx, key_val).FromMaybe(false);
 }
 
 int ObjectHasIdx(ValuePtr ptr, uint32_t idx) {
   LOCAL_OBJECT(ptr);
-  return obj->Has(local_ctx, idx).ToChecked();
+  return obj->Has(local_ctx, idx).FromMaybe(false);
 }
 
 int ObjectDelete(ValuePtr ptr, const char* key) {
   LOCAL_OBJECT(ptr);
   Local<String> key_val =
       String::NewFromUtf8(iso, key, NewStringType::kNormal).ToLocalChecked();
-  return obj->Delete(local_ctx, key_val).ToChecked();
+  return obj->Delete(local_ctx, key_val).FromMaybe(false);
 }
 
 int ObjectDeleteIdx(ValuePtr ptr, uint32_t idx) {
   LOCAL_OBJECT(ptr);
-  return obj->Delete(local_ctx, idx).ToChecked();
+  return obj->Delete(local_ctx, idx).FromMaybe(false);
 }
 
 /********** Promise **********/
@@ -3079,13 +3081,13 @@ ValuePtr PromiseResolverGetPromise(ValuePtr ptr) {
 int PromiseResolverResolve(ValuePtr ptr, ValuePtr resolve_val) {
   LOCAL_VALUE(ptr);
   Local<Promise::Resolver> resolver = value.As<Promise::Resolver>();
-  return resolver->Resolve(local_ctx, resolve_val->ptr.Get(iso)).ToChecked();
+  return resolver->Resolve(local_ctx, resolve_val->ptr.Get(iso)).FromMaybe(false);
 }
 
 int PromiseResolverReject(ValuePtr ptr, ValuePtr reject_val) {
   LOCAL_VALUE(ptr);
   Local<Promise::Resolver> resolver = value.As<Promise::Resolver>();
-  return resolver->Reject(local_ctx, reject_val->ptr.Get(iso)).ToChecked();
+  return resolver->Reject(local_ctx, reject_val->ptr.Get(iso)).FromMaybe(false);
 }
 
 int PromiseState(ValuePtr ptr) {

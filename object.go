@@ -124,6 +124,36 @@ func (o *Object) GetKey(key *Value) (*Value, error) {
 	return valueResult(o.ctx, rtn)
 }
 
+// SetPrivate sets a property keyed by a v8::Private named name. Script cannot
+// see it at all -- not by any key, not through Reflect.ownKeys or a Proxy --
+// which is what an embedder needs for a slot a page must never reach. The
+// same name answers the same private throughout the isolate.
+func (o *Object) SetPrivate(name string, val interface{}) error {
+	value, err := coerceValue(o.ctx.iso, val)
+	if err != nil {
+		return err
+	}
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	C.ObjectSetPrivate(o.ptr, cname, value.ptr)
+	return nil
+}
+
+// GetPrivate reads a property SetPrivate set; undefined when there is none.
+func (o *Object) GetPrivate(name string) (*Value, error) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	rtn := C.ObjectGetPrivate(o.ptr, cname)
+	return valueResult(o.ctx, rtn)
+}
+
+// DeletePrivate removes a property SetPrivate set.
+func (o *Object) DeletePrivate(name string) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	C.ObjectDeletePrivate(o.ptr, cname)
+}
+
 // Get tries to get a Value for a given Object property key.
 func (o *Object) Get(key string) (*Value, error) {
 	ckey := C.CString(key)

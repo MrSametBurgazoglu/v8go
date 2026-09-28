@@ -2954,6 +2954,47 @@ RtnValue ObjectGetValueKey(ValuePtr ptr, ValuePtr key_ptr) {
   return rtn;
 }
 
+// A property keyed by a v8::Private: invisible to script entirely -- not
+// listed by Reflect.ownKeys or getOwnPropertySymbols, not reachable by any
+// key a script can build, not seen by a Proxy trap. Private::ForApi answers
+// the same private for the same name everywhere in the isolate, so an
+// embedder names its slot by a string and never holds a handle to it.
+void ObjectSetPrivate(ValuePtr ptr, const char* name, ValuePtr prop_val) {
+  LOCAL_OBJECT(ptr);
+  Local<String> name_val =
+      String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
+  Local<Private> key = Private::ForApi(iso, name_val);
+  obj->SetPrivate(local_ctx, key, prop_val->ptr.Get(iso)).Check();
+}
+
+RtnValue ObjectGetPrivate(ValuePtr ptr, const char* name) {
+  LOCAL_OBJECT(ptr);
+  RtnValue rtn = {};
+  Local<String> name_val =
+      String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
+  Local<Private> key = Private::ForApi(iso, name_val);
+  Local<Value> result;
+  if (!obj->GetPrivate(local_ctx, key).ToLocal(&result)) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+  m_value* new_val = new m_value;
+  new_val->id = 0;
+  new_val->iso = iso;
+  new_val->ctx = ctx;
+  new_val->ptr = Global<Value>(iso, result);
+  rtn.value = tracked_value(ctx, new_val);
+  return rtn;
+}
+
+void ObjectDeletePrivate(ValuePtr ptr, const char* name) {
+  LOCAL_OBJECT(ptr);
+  Local<String> name_val =
+      String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
+  Local<Private> key = Private::ForApi(iso, name_val);
+  obj->DeletePrivate(local_ctx, key).Check();
+}
+
 RtnValue ObjectGet(ValuePtr ptr, const char* key) {
   LOCAL_OBJECT(ptr);
   RtnValue rtn = {};

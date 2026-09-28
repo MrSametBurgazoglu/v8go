@@ -120,3 +120,54 @@ func TestSnapshotReplayDivergenceFails(t *testing.T) {
 		t.Fatal("a divergent replay succeeded")
 	}
 }
+
+// A wrapper's integer internal field — an embedder's key for the native
+// object behind it — survives the snapshot; V8's serialiser takes a small
+// integer for an aligned pointer and would otherwise hand it to a callback
+// nobody installed.
+func TestSnapshotKeepsIntegerInternalFields(t *testing.T) {
+	creator := NewSnapshotCreator()
+	iso := creator.Isolate()
+	table := NewCallbackTable()
+	iso.BeginRecording(table)
+	wrapper := NewObjectTemplate(iso)
+	wrapper.SetInternalFieldCount(1)
+	rec := iso.EndRecording()
+	ctx := NewContext(iso)
+	obj, err := wrapper.NewInstance(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := NewValue(iso, int32(4242))
+	if err := obj.SetInternalField(0, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.Global().Set("keyed", obj); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := creator.CreateBlob(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iso2, err := NewIsolateFromSnapshot(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer iso2.Dispose()
+	ctx2, err := NewContextFromSnapshot(iso2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctx2.Close()
+	v, err := ctx2.Global().Get("keyed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := v.AsObject()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := o.GetInternalField(0); f == nil || f.Int32() != 4242 {
+		t.Errorf("internal field after the snapshot: %v, want 4242", f)
+	}
+}

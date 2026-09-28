@@ -5024,6 +5024,43 @@ static intptr_t* snapshotExternalReferences() {
   return refs;
 }
 
+// An internal field v8go writes holds a small integer (an embedder's key for
+// the native object behind a wrapper), which V8's serialiser cannot tell
+// from an aligned pointer and so hands here. It is carried as its four
+// bytes and written back on deserialisation; anything else is left to V8.
+static StartupData serializeInternalField(Local<Object> holder,
+                                          int index,
+                                          void* data) {
+  Local<Data> field = holder->GetInternalField(index);
+  if (!field.IsEmpty() && field->IsValue() && field.As<Value>()->IsInt32()) {
+    int32_t v = field.As<Value>().As<Int32>()->Value();
+    char* bytes = new char[sizeof(v)];
+    memcpy(bytes, &v, sizeof(v));
+    return StartupData{bytes, static_cast<int>(sizeof(v))};
+  }
+  return StartupData{nullptr, 0};
+}
+
+static void deserializeInternalField(Local<Object> holder,
+                                     int index,
+                                     StartupData payload,
+                                     void* data) {
+  if (payload.raw_size != sizeof(int32_t)) {
+    return;
+  }
+  int32_t v;
+  memcpy(&v, payload.data, sizeof(v));
+  holder->SetInternalField(index, Integer::New(Isolate::GetCurrent(), v));
+}
+
+// The context's embedder data is v8go's own reference, rewritten when the
+// context is deserialised; nothing of it is carried.
+static StartupData serializeContextData(Local<Context> holder,
+                                        int index,
+                                        void* data) {
+  return StartupData{nullptr, 0};
+}
+
 static std::unordered_map<Isolate*, SnapshotCreator*>& snapshotCreators() {
   static std::unordered_map<Isolate*, SnapshotCreator*> creators;
   return creators;
@@ -5046,6 +5083,7 @@ int SnapshotCreatorAddTemplate(IsolatePtr iso, TemplatePtr tmpl) {
     return -1;
   }
   Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
   HandleScope handle_scope(iso);
   return static_cast<int>(it->second->AddData(tmpl->ptr->Get(iso)));
 }
@@ -5056,8 +5094,11 @@ int SnapshotCreatorAddContext(IsolatePtr iso, ContextPtr ctx) {
     return -1;
   }
   Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
   HandleScope handle_scope(iso);
-  return static_cast<int>(it->second->AddContext(ctx->ptr.Get(iso)));
+  return static_cast<int>(it->second->AddContext(
+      ctx->ptr.Get(iso), SerializeInternalFieldsCallback(serializeInternalField),
+      SerializeContextDataCallback(serializeContextData)));
 }
 
 // SnapshotCreatorCreateBlob cuts the blob and disposes of the creator and its
@@ -5074,6 +5115,7 @@ char* SnapshotCreatorCreateBlob(IsolatePtr iso, int* size) {
   StartupData blob;
   {
     Locker locker(iso);
+    Isolate::Scope isolate_scope(iso);
     {
       HandleScope handle_scope(iso);
       m_ctx* internal = isolateInternalContext(iso);
@@ -5165,8 +5207,10 @@ ContextPtr NewContextFromSnapshot(IsolatePtr iso,
     kept.erase(it);
   }
   Local<Context> local_ctx;
-  if (!Context::FromSnapshot(iso, index, DeserializeInternalFieldsCallback(),
-                             nullptr, global_object)
+  if (!Context::FromSnapshot(
+           iso, index,
+           DeserializeInternalFieldsCallback(deserializeInternalField),
+           nullptr, global_object)
            .ToLocal(&local_ctx)) {
     return nullptr;
   }

@@ -98,6 +98,7 @@ func NewContextAdoptingGlobal(iso *Isolate, gTmpl *ObjectTemplate, adoptFrom int
 		ptr: C.NewContextAdoptingGlobal(iso.ptr, gTmpl.ptr, C.int(ref), C.int(adoptFrom)),
 		iso: iso,
 	}
+	ctx.adoptLogTable()
 	ctx.register()
 	runtime.KeepAlive(gTmpl)
 	return ctx
@@ -129,6 +130,7 @@ func NewContext(opt ...ContextOption) *Context {
 		ptr: C.NewContext(opts.iso.ptr, opts.gTmpl.ptr, C.int(ref)),
 		iso: opts.iso,
 	}
+	ctx.adoptLogTable()
 	ctx.register()
 	runtime.KeepAlive(opts.gTmpl)
 	return ctx

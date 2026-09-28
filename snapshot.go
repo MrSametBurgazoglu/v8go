@@ -437,3 +437,12 @@ func contextsOf(iso *Isolate) []*Context {
 	}
 	return out
 }
+
+// adoptLogTable gives a context made while its isolate records or replays
+// the log's callback table: the construction being logged is the context's
+// own, and its natives are called before the embedder could set one.
+func (c *Context) adoptLogTable() {
+	if c.iso != nil && c.iso.log != nil {
+		c.callbacks = c.iso.log.table
+	}
+}

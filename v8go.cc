@@ -101,6 +101,9 @@ struct m_value {
   Isolate* iso;
   m_ctx* ctx;
   Global<Value> ptr;
+  // weak_token is what a token-weak handle reports when it is collected
+  // (ValueSetWeakToken); zero otherwise.
+  int64_t weak_token = 0;
 };
 
 struct m_template {
@@ -1240,6 +1243,7 @@ TemplatePtr FunctionTemplatePrototypeSetMethod(TemplatePtr ptr,
 
 static void weakValueCallback(const WeakCallbackInfo<m_value>& info);
 static void weakValueReleasingCallback(const WeakCallbackInfo<m_value>& info);
+static void weakTokenCallback(const WeakCallbackInfo<m_value>& info);
 
 // The template's data is one Number: the callback reference times 2^16 plus
 // the spec, two bits an argument ('v' = 1, 's' = 2), so a call reads both
@@ -1451,7 +1455,7 @@ RtnValue ObjectTemplateNewWrapper(TemplatePtr ptr,
                                   int n,
                                   ValuePtr* keys,
                                   ValuePtr* vals,
-                                  int weak) {
+                                  int64_t weak_token) {
   LOCAL_TEMPLATE(ptr);
   TryCatch try_catch(iso);
   Local<Context> local_ctx = ctx->ptr.Get(iso);
@@ -1491,9 +1495,9 @@ RtnValue ObjectTemplateNewWrapper(TemplatePtr ptr,
   val->ctx = ctx;
   val->ptr = Global<Value>(iso, obj);
   rtn.value = tracked_value(ctx, val);
-  if (weak) {
-    val->ptr.SetWeak(val, weakValueReleasingCallback,
-                     WeakCallbackType::kParameter);
+  if (weak_token != 0) {
+    val->weak_token = weak_token;
+    val->ptr.SetWeak(val, weakTokenCallback, WeakCallbackType::kParameter);
   }
   return rtn;
 }
@@ -1538,6 +1542,30 @@ static void weakValueReleasingCallback(const WeakCallbackInfo<m_value>& info) {
     val->ctx->vals.erase(val->id);
   }
   delete val;
+}
+
+// weakTokenCallback frees a token-weak handle and reports its token to the
+// process's token handler: no Go-side registry per handle, and no closure.
+static void weakTokenCallback(const WeakCallbackInfo<m_value>& info) {
+  m_value* val = info.GetParameter();
+  if (val == nullptr) {
+    return;
+  }
+  int64_t token = val->weak_token;
+  val->ptr.Reset();
+  if (val->id != 0 && val->ctx != nullptr) {
+    val->ctx->vals.erase(val->id);
+  }
+  delete val;
+  goWeakTokenCallback(token);
+}
+
+void ValueSetWeakToken(ValuePtr ptr, int64_t token) {
+  if (ptr == nullptr || ptr->ptr.IsEmpty()) {
+    return;
+  }
+  ptr->weak_token = token;
+  ptr->ptr.SetWeak(ptr, weakTokenCallback, WeakCallbackType::kParameter);
 }
 
 void ValueSetWeakReleasing(ValuePtr ptr) {

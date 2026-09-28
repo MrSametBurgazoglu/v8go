@@ -356,8 +356,8 @@ extern TemplatePtr NewFastFunctionTemplate(IsolatePtr iso_ptr,
 // ObjectTemplateNewWrapper is NewInstance, SetInternalField(0, field),
 // SetPrototype(proto) and n own properties keyed by the given handles, in one
 // crossing: what a DOM wrapper costs to make. proto and the keys and values
-// are borrowed. With weak, the handle is born weak and releasing (see
-// ValuesSetWeak).
+// are borrowed. A nonzero weak_token makes the handle born token-weak (see
+// ValueSetWeakToken).
 extern RtnValue ObjectTemplateNewWrapper(TemplatePtr ptr,
                                          ContextPtr ctx_ptr,
                                          int32_t field,
@@ -365,7 +365,7 @@ extern RtnValue ObjectTemplateNewWrapper(TemplatePtr ptr,
                                          int n,
                                          ValuePtr* keys,
                                          ValuePtr* vals,
-                                         int weak);
+                                         int64_t weak_token);
 
 // NewArrayOfValues builds a JS array of the given borrowed handles, holes for
 // the null ones, in one crossing.
@@ -376,6 +376,10 @@ extern RtnValue NewArrayOfValues(ContextPtr ctx_ptr, int n, ValuePtr* vals);
 // Go side must not release it.
 extern void ValuesSetWeak(int n, ValuePtr* ptrs, int releasing);
 extern void ValueSetWeakReleasing(ValuePtr ptr);
+// ValueSetWeakToken makes a handle weak with no Go-side callback of its own:
+// when V8 collects the value the handle is freed and token goes to the
+// process's weak token handler (goWeakTokenCallback).
+extern void ValueSetWeakToken(ValuePtr ptr, int64_t token);
 extern RtnValue FunctionTemplateGetFunction(TemplatePtr ptr,
                                             ContextPtr ctx_ptr);
 // Like TemplateSetValue, but targets the FunctionTemplate's prototype so

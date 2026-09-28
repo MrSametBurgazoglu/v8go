@@ -5,6 +5,7 @@ package v8go
 import "C"
 import (
 	"runtime"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -280,19 +281,22 @@ func goFastCallback(ctxref C.int, cbref C.int, field0 C.int64_t, argc C.int, arg
 // property per key/value pair — the whole of making a DOM wrapper, in one
 // crossing. proto, keys and vals are borrowed.
 func (o *ObjectTemplate) NewWrapper(ctx *Context, field int32, proto *Value, keys, vals []*Value) (*Object, error) {
-	return o.newWrapper(ctx, field, proto, keys, vals, nil)
+	return o.newWrapper(ctx, field, proto, keys, vals, 0)
 }
 
-// NewWeakWrapper is NewWrapper with the handle born weak and releasing, as
-// SetWeakReleasing would leave it, without the second crossing. The caller
-// must hand the object to script before anything can run a collection — in
+// NewWeakWrapper is NewWrapper with the handle born token-weak, as
+// SetWeakToken would leave it, without the second crossing. The caller must
+// hand the object to script before anything can run a collection — in
 // practice, return it from the callback that made it — or the collection can
-// free the handle under it.
-func (o *ObjectTemplate) NewWeakWrapper(ctx *Context, field int32, proto *Value, onCollected func()) (*Object, error) {
-	return o.newWrapper(ctx, field, proto, nil, nil, onCollected)
+// free the handle under it. token must not be zero.
+func (o *ObjectTemplate) NewWeakWrapper(ctx *Context, field int32, proto *Value, token int64) (*Object, error) {
+	if token == 0 {
+		panic("v8go: a weak token is never zero")
+	}
+	return o.newWrapper(ctx, field, proto, nil, nil, token)
 }
 
-func (o *ObjectTemplate) newWrapper(ctx *Context, field int32, proto *Value, keys, vals []*Value, onCollected func()) (*Object, error) {
+func (o *ObjectTemplate) newWrapper(ctx *Context, field int32, proto *Value, keys, vals []*Value, token int64) (*Object, error) {
 	if len(keys) != len(vals) {
 		panic("v8go: NewWrapper needs a value per key")
 	}
@@ -320,11 +324,7 @@ func (o *ObjectTemplate) newWrapper(ctx *Context, field int32, proto *Value, key
 		}
 		kp, vp = &ks[0], &vs[0]
 	}
-	weak := C.int(0)
-	if onCollected != nil {
-		weak = 1
-	}
-	rtn := C.ObjectTemplateNewWrapper(o.ptr, ctx.ptr, C.int32_t(field), protoPtr, C.int(n), kp, vp, weak)
+	rtn := C.ObjectTemplateNewWrapper(o.ptr, ctx.ptr, C.int32_t(field), protoPtr, C.int(n), kp, vp, C.int64_t(token))
 	runtime.KeepAlive(o)
 	runtime.KeepAlive(proto)
 	runtime.KeepAlive(keys)
@@ -332,13 +332,6 @@ func (o *ObjectTemplate) newWrapper(ctx *Context, field int32, proto *Value, key
 	val, err := valueResult(ctx, rtn)
 	if err != nil {
 		return nil, err
-	}
-	if onCollected != nil {
-		// No V8 work happens between the handle going weak and this, so the
-		// callback is filed before any collection can want it.
-		weakHandlers.Lock()
-		weakHandlers.byPtr[unsafe.Pointer(val.ptr)] = onCollected
-		weakHandlers.Unlock()
 	}
 	return &Object{val}, nil
 }
@@ -417,4 +410,51 @@ func setWeakAll(vals []*Value, onCollected []func(), releasing bool) {
 	}
 	C.ValuesSetWeak(C.int(len(ptrs)), &ptrs[0], r)
 	runtime.KeepAlive(vals)
+}
+
+// Token-weak handles.
+//
+// SetWeak files a Go closure per handle in a process-wide map and frees
+// nothing itself; an embedder weakening a wrapper per DOM node pays a map
+// insert, a map delete and a closure for each, and a Release crossing when it
+// is collected. A token-weak handle carries an int64 of the embedder's choosing
+// instead: collected, the handle is freed on the C++ side and the token goes
+// to the one handler the process registered. ClearWeakToken takes the handle
+// back; it is the embedder's again, to release as any other.
+
+// weakTokenHandler holds a weakTokenFn (atomic.Value needs one concrete
+// type; the go.mod's language version predates atomic.Pointer).
+var weakTokenHandler atomic.Value
+
+type weakTokenFn func(int64)
+
+// SetWeakTokenHandler registers the process's handler for collected
+// token-weak handles. It runs on the collecting isolate's thread, inside the
+// garbage collection, and must not create handles or run script.
+func SetWeakTokenHandler(fn func(token int64)) {
+	weakTokenHandler.Store(weakTokenFn(fn))
+}
+
+// SetWeakToken makes the handle token-weak. The handle is freed when V8
+// collects the value; token goes to the handler. token must not be zero.
+func (v *Value) SetWeakToken(token int64) {
+	if v == nil || v.ptr == nil || token == 0 {
+		return
+	}
+	C.ValueSetWeakToken(v.ptr, C.int64_t(token))
+}
+
+// ClearWeakToken makes a token-weak handle strong again.
+func (v *Value) ClearWeakToken() {
+	if v == nil || v.ptr == nil {
+		return
+	}
+	C.ValueClearWeak(v.ptr)
+}
+
+//export goWeakTokenCallback
+func goWeakTokenCallback(token C.int64_t) {
+	if fn, _ := weakTokenHandler.Load().(weakTokenFn); fn != nil {
+		fn(int64(token))
+	}
 }

@@ -1236,6 +1236,292 @@ TemplatePtr FunctionTemplatePrototypeSetMethod(TemplatePtr ptr,
   return ot;
 }
 
+/********** Fast callbacks **********/
+
+// The template's data is one Number: the callback reference times 2^16 plus
+// the spec, two bits an argument ('v' = 1, 's' = 2), so a call reads both
+// with one load. A double holds a reference up to 2^37, and a reference is a
+// per-isolate counter of templates made.
+static const double kFastSpecRadix = 65536.0;
+
+static int fastSpecBits(const char* spec) {
+  int bits = 0;
+  for (int i = 0; spec != nullptr && spec[i] != 0 && i < kFastMaxArgs; i++) {
+    int code = spec[i] == 's' ? 2 : 1;
+    bits |= code << (2 * i);
+  }
+  return bits;
+}
+
+// fastDecode fills |out| for one argument. |storage| owns a string's bytes
+// for the rest of the call. False means a conversion threw: the exception is
+// pending and the call must return without running the binding.
+static bool fastDecode(Isolate* iso,
+                       Local<Context> local_ctx,
+                       Local<Value> v,
+                       int code,
+                       FastArg* out,
+                       std::string* storage) {
+  out->i32 = 0;
+  out->f64 = 0;
+  out->str = nullptr;
+  out->len = 0;
+  if (v->IsUndefined()) {
+    out->kind = FastUndefined;
+  } else if (v->IsNull()) {
+    out->kind = FastNull;
+  } else if (v->IsBoolean()) {
+    out->kind = FastBool;
+    out->i32 = v->IsTrue() ? 1 : 0;
+  } else if (v->IsInt32()) {
+    out->kind = FastInt32;
+    out->i32 = v.As<Int32>()->Value();
+    out->f64 = out->i32;
+  } else if (v->IsNumber()) {
+    out->kind = FastNumber;
+    out->f64 = v.As<Number>()->Value();
+  } else if (v->IsString()) {
+    out->kind = FastString;
+  } else if (v->IsObject()) {
+    out->kind = FastObject;
+    Local<Object> obj = v.As<Object>();
+    if (obj->InternalFieldCount() > 0) {
+      Local<Data> field = obj->GetInternalField(0);
+      if (!field.IsEmpty() && field->IsValue() &&
+          field.As<Value>()->IsInt32()) {
+        out->kind = FastWrapper;
+        out->i32 = field.As<Value>().As<Int32>()->Value();
+      }
+    }
+  } else {
+    out->kind = FastOther;
+  }
+  Local<String> str;
+  if (out->kind == FastString) {
+    str = v.As<String>();
+  } else if (code == 2) {
+    if (!v->ToString(local_ctx).ToLocal(&str)) {
+      return false;
+    }
+  } else {
+    return true;
+  }
+  size_t len = str->Utf8LengthV2(iso);
+  storage->resize(len);
+  str->WriteUtf8V2(iso, storage->data(), len);
+  out->str = storage->data();
+  out->len = static_cast<int>(len);
+  return true;
+}
+
+// The per-isolate buffer a string result is written into. 64 KiB: a longer
+// result comes back as a minted value instead.
+static const int kFastRetBufSize = 64 * 1024;
+static thread_local char* fastRetBuf = nullptr;
+
+static void FastFunctionTemplateCallback(
+    const FunctionCallbackInfo<Value>& info) {
+  Isolate* iso = info.GetIsolate();
+  HandleScope handle_scope(iso);
+  Local<Context> local_ctx = iso->GetCurrentContext();
+  if (local_ctx.IsEmpty()) {
+    return;
+  }
+  Local<Value> ref_val = local_ctx->GetEmbedderData(1);
+  if (ref_val.IsEmpty() || !ref_val->IsInt32()) {
+    return;
+  }
+  int ctx_ref = ref_val.As<Integer>()->Value();
+
+  double data = info.Data().As<Number>()->Value();
+  int callback_ref = static_cast<int>(data / kFastSpecRadix);
+  int spec = static_cast<int>(data - callback_ref * kFastSpecRadix);
+
+  int64_t this_field0 = kNoInternalField;
+  {
+    Local<Object> self = info.This();
+    if (self->InternalFieldCount() > 0) {
+      Local<Data> field = self->GetInternalField(0);
+      if (!field.IsEmpty() && field->IsValue()) {
+        Local<Value> value = field.As<Value>();
+        if (value->IsInt32()) {
+          this_field0 = value.As<Int32>()->Value();
+        }
+      }
+    }
+  }
+
+  int args_count = info.Length();
+  FastArg args[kFastMaxArgs];
+  std::string storage[kFastMaxArgs];
+  for (int i = 0; i < kFastMaxArgs; i++) {
+    int code = (spec >> (2 * i)) & 3;
+    if (code == 0) {
+      break;
+    }
+    if (i >= args_count) {
+      args[i].kind = FastAbsent;
+      args[i].i32 = 0;
+      args[i].f64 = 0;
+      args[i].str = nullptr;
+      args[i].len = 0;
+      continue;
+    }
+    if (!fastDecode(iso, local_ctx, info[i], code, &args[i], &storage[i])) {
+      return;
+    }
+  }
+
+  if (fastRetBuf == nullptr) {
+    fastRetBuf = static_cast<char*>(malloc(kFastRetBufSize));
+  }
+  FastRet ret = {};
+  ret.kind = FastRetUndefined;
+  ret.buf = fastRetBuf;
+  ret.cap = kFastRetBufSize;
+
+  goFastCallback(ctx_ref, callback_ref, this_field0, args_count, args, &ret);
+
+  ReturnValue<Value> rv = info.GetReturnValue();
+  switch (ret.kind) {
+    case FastRetNull:
+      rv.SetNull();
+      break;
+    case FastRetBool:
+      rv.Set(ret.i32 != 0);
+      break;
+    case FastRetInt32:
+      rv.Set(ret.i32);
+      break;
+    case FastRetNumber:
+      rv.Set(ret.f64);
+      break;
+    case FastRetString: {
+      Local<String> str;
+      if (String::NewFromUtf8(iso, ret.buf, NewStringType::kNormal, ret.len)
+              .ToLocal(&str)) {
+        rv.Set(str);
+      }
+      break;
+    }
+    case FastRetValue:
+      if (ret.value != nullptr) {
+        rv.Set(ret.value->ptr.Get(iso));
+      }
+      break;
+    case FastRetOwnedValue:
+      if (ret.value != nullptr) {
+        m_value* val = ret.value;
+        rv.Set(val->ptr.Get(iso));
+        if (val->id != 0 && val->ctx != nullptr) {
+          val->ctx->vals.erase(val->id);
+        }
+        val->ptr.Reset();
+        delete val;
+      }
+      break;
+    default:
+      rv.SetUndefined();
+  }
+}
+
+TemplatePtr NewFastFunctionTemplate(IsolatePtr iso,
+                                    int callback_ref,
+                                    const char* spec) {
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+
+  Local<Number> cbData = Number::New(
+      iso, callback_ref * kFastSpecRadix + fastSpecBits(spec));
+  m_template* ot = new m_template;
+  ot->iso = iso;
+  ot->ptr = new Persistent<Template>(
+      iso, FunctionTemplate::New(iso, FastFunctionTemplateCallback, cbData));
+  return ot;
+}
+
+RtnValue ObjectTemplateNewWrapper(TemplatePtr ptr,
+                                  ContextPtr ctx,
+                                  int32_t field,
+                                  ValuePtr proto,
+                                  int n,
+                                  ValuePtr* keys,
+                                  ValuePtr* vals) {
+  LOCAL_TEMPLATE(ptr);
+  TryCatch try_catch(iso);
+  Local<Context> local_ctx = ctx->ptr.Get(iso);
+  Context::Scope context_scope(local_ctx);
+
+  RtnValue rtn = {};
+  Local<ObjectTemplate> obj_tmpl = tmpl.As<ObjectTemplate>();
+  Local<Object> obj;
+  if (!obj_tmpl->NewInstance(local_ctx).ToLocal(&obj)) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+  if (obj->InternalFieldCount() > 0) {
+    obj->SetInternalField(0, Integer::New(iso, field));
+  }
+  if (proto != nullptr) {
+    Local<Value> p = proto->ptr.Get(iso);
+    if (!obj->SetPrototype(local_ctx, p).FromMaybe(false)) {
+      rtn.error = ExceptionError(try_catch, iso, local_ctx);
+      return rtn;
+    }
+  }
+  for (int i = 0; i < n; i++) {
+    if (keys[i] == nullptr || vals[i] == nullptr) {
+      continue;
+    }
+    if (obj->Set(local_ctx, keys[i]->ptr.Get(iso), vals[i]->ptr.Get(iso))
+            .IsNothing()) {
+      rtn.error = ExceptionError(try_catch, iso, local_ctx);
+      return rtn;
+    }
+  }
+
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, obj);
+  rtn.value = tracked_value(ctx, val);
+  return rtn;
+}
+
+RtnValue NewArrayOfValues(ContextPtr ctx, int n, ValuePtr* vals) {
+  Isolate* iso = ctx->iso;
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  Local<Context> local_ctx = ctx->ptr.Get(iso);
+  Context::Scope context_scope(local_ctx);
+  RtnValue rtn = {};
+  std::vector<Local<Value>> elements(n);
+  for (int i = 0; i < n; i++) {
+    if (vals[i] == nullptr) {
+      elements[i] = Undefined(iso);
+    } else {
+      elements[i] = vals[i]->ptr.Get(iso);
+    }
+  }
+  Local<Array> arr = Array::New(iso, elements.data(), n);
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, arr);
+  rtn.value = tracked_value(ctx, val);
+  return rtn;
+}
+
+void ValuesSetWeak(int n, ValuePtr* ptrs) {
+  for (int i = 0; i < n; i++) {
+    ValueSetWeak(ptrs[i]);
+  }
+}
+
 /********** WebIDL binding shape **********/
 
 // A generated interface is a FunctionTemplate whose prototype carries accessor

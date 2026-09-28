@@ -287,6 +287,90 @@ extern void ObjectTemplateSetCallAsFunctionHandler(TemplatePtr ptr,
                                                    int callback_ref);
 
 extern TemplatePtr NewFunctionTemplate(IsolatePtr iso_ptr, int callback_ref);
+
+// The lean callback ABI.
+//
+// A classic callback (NewFunctionTemplate) mints a tracked m_value -- a
+// Global<Value> and a context map entry -- for the receiver and for every
+// argument, and the embedder pays a cgo crossing to read each one and another
+// to release it. A fast callback crosses once: the receiver arrives as its
+// internal field 0, each argument decoded here into a FastArg according to the
+// template's spec, and the result goes back through a FastRet the Go side
+// fills without a handle of its own.
+//
+// Spec letters, one per leading argument (at most kFastMaxArgs): 'v' decodes
+// a primitive as itself, a string as UTF-8 and an object as its internal
+// field 0 when it carries an int32 one; 's' is WebIDL DOMString -- 'v', then
+// any non-string converted with ToString, whose exception propagates.
+enum {
+  kFastMaxArgs = 4,
+};
+enum FastKind {
+  FastAbsent = 0,
+  FastUndefined = 1,
+  FastNull = 2,
+  FastBool = 3,
+  FastInt32 = 4,
+  FastNumber = 5,
+  FastString = 6,
+  FastObject = 7,
+  FastWrapper = 8,
+  FastOther = 9,
+};
+typedef struct {
+  int kind;
+  int32_t i32;
+  double f64;
+  const char* str;
+  int len;
+} FastArg;
+
+// FastRet kinds. FastRetValue sets a handle the Go side keeps (a cached
+// wrapper); FastRetOwnedValue sets one the call minted and frees it after.
+// FastRetString copies len bytes from buf, which is C memory the Go side
+// wrote into; a string longer than cap comes back as FastRetOwnedValue.
+enum FastRetKind {
+  FastRetUndefined = 0,
+  FastRetNull = 1,
+  FastRetBool = 2,
+  FastRetInt32 = 3,
+  FastRetNumber = 4,
+  FastRetString = 5,
+  FastRetValue = 6,
+  FastRetOwnedValue = 7,
+};
+typedef struct {
+  int kind;
+  int32_t i32;
+  double f64;
+  ValuePtr value;
+  char* buf;
+  int cap;
+  int len;
+} FastRet;
+
+extern TemplatePtr NewFastFunctionTemplate(IsolatePtr iso_ptr,
+                                           int callback_ref,
+                                           const char* spec);
+
+// ObjectTemplateNewWrapper is NewInstance, SetInternalField(0, field),
+// SetPrototype(proto) and n own properties keyed by the given handles, in one
+// crossing: what a DOM wrapper costs to make. proto and the keys and values
+// are borrowed.
+extern RtnValue ObjectTemplateNewWrapper(TemplatePtr ptr,
+                                         ContextPtr ctx_ptr,
+                                         int32_t field,
+                                         ValuePtr proto,
+                                         int n,
+                                         ValuePtr* keys,
+                                         ValuePtr* vals);
+
+// NewArrayOfValues builds a JS array of the given borrowed handles, holes for
+// the null ones, in one crossing.
+extern RtnValue NewArrayOfValues(ContextPtr ctx_ptr, int n, ValuePtr* vals);
+
+// ValuesSetWeak is ValueSetWeak for n handles in one crossing.
+extern void ValuesSetWeak(int n, ValuePtr* ptrs);
 extern RtnValue FunctionTemplateGetFunction(TemplatePtr ptr,
                                             ContextPtr ctx_ptr);
 // Like TemplateSetValue, but targets the FunctionTemplate's prototype so

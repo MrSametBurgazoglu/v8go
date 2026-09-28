@@ -26,6 +26,13 @@ type Isolate struct {
 	cbMutex sync.RWMutex
 	cbSeq   int
 	cbs     map[int]FunctionCallback
+	// fastCbs holds the fast templates' callbacks, numbered from the same
+	// sequence as cbs so a reference names exactly one of the two.
+	fastCbs map[int]FastCallback
+	// fastInfos is the stack goFastCallback takes its FastCallbackInfo
+	// from, fastDepth how much of it the calls in progress hold.
+	fastInfos []*FastCallbackInfo
+	fastDepth int
 
 	null      *Value
 	undefined *Value
@@ -457,6 +464,25 @@ func (i *Isolate) apply(opts *contextOptions) {
 	opts.iso = i
 }
 
+// registerFastCallback is registerCallback for a FastCallback.
+func (i *Isolate) registerFastCallback(cb FastCallback) int {
+	i.cbMutex.Lock()
+	i.cbSeq++
+	ref := i.cbSeq
+	if i.fastCbs == nil {
+		i.fastCbs = map[int]FastCallback{}
+	}
+	i.fastCbs[ref] = cb
+	i.cbMutex.Unlock()
+	return ref
+}
+
+func (i *Isolate) getFastCallback(ref int) FastCallback {
+	i.cbMutex.RLock()
+	defer i.cbMutex.RUnlock()
+	return i.fastCbs[ref]
+}
+
 func (i *Isolate) registerCallback(cb FunctionCallback) int {
 	i.cbMutex.Lock()
 	i.cbSeq++
@@ -474,13 +500,14 @@ func (i *Isolate) registerCallback(cb FunctionCallback) int {
 func (i *Isolate) CallbackCount() int {
 	i.cbMutex.RLock()
 	defer i.cbMutex.RUnlock()
-	return len(i.cbs)
+	return len(i.cbs) + len(i.fastCbs)
 }
 
 // unregisterCallback forgets a callback a released template registered.
 func (i *Isolate) unregisterCallback(ref int) {
 	i.cbMutex.Lock()
 	delete(i.cbs, ref)
+	delete(i.fastCbs, ref)
 	i.cbMutex.Unlock()
 }
 

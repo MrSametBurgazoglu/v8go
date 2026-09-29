@@ -97,6 +97,35 @@ func (t *template) Set(name string, val interface{}, attributes ...PropertyAttri
 	return nil
 }
 
+// SetPrivate adds a property keyed by the v8::Private named name -- the one
+// Object.SetPrivate and Context.PrivateSymbol name -- to each instance the
+// template creates. Script sees no key for it. val must be a primitive.
+func (t *template) SetPrivate(name string, val interface{}, attributes ...PropertyAttribute) error {
+	var attrs PropertyAttribute
+	for _, a := range attributes {
+		attrs |= a
+	}
+	var ptr C.ValuePtr
+	switch v := val.(type) {
+	case *Value:
+		if v.IsObject() || v.IsExternal() {
+			return errors.New("v8go: SetPrivate takes a primitive")
+		}
+		ptr = v.ptr
+	default:
+		newVal, err := NewValue(t.iso, v)
+		if err != nil {
+			return fmt.Errorf("v8go: unable to create new value: %v", err)
+		}
+		ptr = newVal.ptr
+	}
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	C.TemplateSetPrivate(t.ptr, cname, ptr, C.int(attrs))
+	runtime.KeepAlive(t)
+	return nil
+}
+
 func (t *template) finalizer() {
 	// Using v8::PersistentBase::Reset() wouldn't be thread-safe to do from
 	// this finalizer goroutine so just free the wrapper and let the template

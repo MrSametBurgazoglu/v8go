@@ -168,6 +168,36 @@ func (c *Context) Global() *Object {
 	return &Object{v}
 }
 
+// PrivateSymbol is the private symbol named name, as a value an embedder's
+// own script can key a property by: `obj[key]` reads and writes a property no
+// other script can list or reach -- Reflect.ownKeys, getOwnPropertySymbols
+// and a Proxy all skip it, and Symbol.for never answers it. It is the same
+// private Object.SetPrivate keys by the same name, throughout the isolate.
+//
+// A private-keyed property is found only on the object that owns it: a read
+// does not walk the prototype chain. Anyone holding the value can use it, so
+// it must never be handed to script the embedder does not trust. The handle
+// is owned by the caller.
+func (c *Context) PrivateSymbol(name string) *Value {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	return &Value{C.ContextPrivateSymbol(c.ptr, cname), c}
+}
+
+// PrivateSymbolFunction is a function of this context that answers
+// PrivateSymbol(name) for a string argument, without a crossing into Go: for
+// the embedder's own scripts to mint their keys by. Called as (description,
+// true) it answers a FRESH private symbol instead, unique per call -- the
+// private counterpart of Symbol(description). It must never reach script
+// the embedder does not trust. The handle is owned by the caller.
+func (c *Context) PrivateSymbolFunction() (*Function, error) {
+	val, err := valueResult(c, C.ContextPrivateSymbolFunction(c.ptr))
+	if err != nil {
+		return nil, err
+	}
+	return val.AsFunction()
+}
+
 // SecurityToken is the value V8 compares when script in one context reaches
 // into an object belonging to another. Contexts with tokens that are not the
 // same object cannot read each other's globals: the access check fires and the

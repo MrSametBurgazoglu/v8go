@@ -935,6 +935,22 @@ void TemplateSetValue(TemplatePtr ptr,
   tmpl->Set(prop_name, val->ptr.Get(iso), (PropertyAttribute)attributes);
 }
 
+// A property keyed by the v8::Private named name (Private::ForApi, the one
+// Object.SetPrivate and Context.PrivateSymbol name) on every instance the
+// template makes: a brand script cannot see, copied in with the instance
+// rather than written after it by a second crossing.
+void TemplateSetPrivate(TemplatePtr ptr,
+                        const char* name,
+                        ValuePtr val,
+                        int attributes) {
+  LOCAL_TEMPLATE(ptr);
+
+  Local<String> prop_name =
+      String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
+  tmpl->SetPrivate(Private::ForApi(iso, prop_name), val->ptr.Get(iso),
+                   (PropertyAttribute)attributes);
+}
+
 void TemplateSetTemplate(TemplatePtr ptr,
                          const char* name,
                          TemplatePtr obj,
@@ -2993,6 +3009,74 @@ void ObjectDeletePrivate(ValuePtr ptr, const char* name) {
       String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
   Local<Private> key = Private::ForApi(iso, name_val);
   obj->DeletePrivate(local_ctx, key).Check();
+}
+
+// A private symbol as a VALUE, for script the embedder writes: `obj[key]`
+// with it reads and writes a property no page script can list, name or
+// reach -- getOwnPropertySymbols, Reflect.ownKeys and a Proxy's ownKeys all
+// skip it, and Symbol.for never answers it. It is the same private
+// ObjectSetPrivate keys by name (Private::ForApi), so the embedder's Go side
+// and its scripts agree on one slot. V8 reads a private as a Name throughout
+// (Object::GetPrivate is Get with the key cast to a Value); what it does not
+// do is walk the prototype chain for one, so a private-keyed property is
+// found on the object that owns it and nowhere else.
+//
+// The embedder's script must not hand the value to page script: anyone
+// holding it can use it.
+static Local<Value> PrivateAsValue(Isolate* iso, Local<String> name) {
+  Local<Private> key = Private::ForApi(iso, name);
+  return key.As<Value>();
+}
+
+ValuePtr ContextPrivateSymbol(ContextPtr ctx, const char* name) {
+  LOCAL_CONTEXT(ctx);
+  Local<String> name_val =
+      String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, PrivateAsValue(iso, name_val));
+  return tracked_value(ctx, val);
+}
+
+// mint(name) is ContextPrivateSymbol(name). mint(description, true) is a
+// FRESH private symbol, Private::New: the private counterpart of
+// Symbol(description), unique per call and collected like any other value.
+static void MintPrivateSymbol(const FunctionCallbackInfo<Value>& info) {
+  if (info.Length() < 1 || !info[0]->IsString()) {
+    return;
+  }
+  Isolate* iso = info.GetIsolate();
+  Local<String> name = info[0].As<String>();
+  if (info.Length() > 1 && info[1]->IsTrue()) {
+    info.GetReturnValue().Set(Private::New(iso, name).As<Value>());
+    return;
+  }
+  info.GetReturnValue().Set(PrivateAsValue(iso, name));
+}
+
+// A function of this context that answers the private symbol for a string,
+// as ContextPrivateSymbol does -- or, with a second argument true, a fresh
+// one -- all in C++, no crossing into Go. The embedder hands it to its own
+// scripts only.
+RtnValue ContextPrivateSymbolFunction(ContextPtr ctx) {
+  LOCAL_CONTEXT(ctx);
+  RtnValue rtn = {};
+  Local<Function> fn;
+  if (!Function::New(local_ctx, MintPrivateSymbol, Local<Value>(), 1,
+                     ConstructorBehavior::kThrow)
+           .ToLocal(&fn)) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, fn);
+  rtn.value = tracked_value(ctx, val);
+  return rtn;
 }
 
 RtnValue ObjectGet(ValuePtr ptr, const char* key) {

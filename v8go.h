@@ -272,6 +272,10 @@ extern void TemplateSetValue(TemplatePtr ptr,
                              const char* name,
                              ValuePtr val_ptr,
                              int attributes);
+extern void TemplateSetPrivate(TemplatePtr ptr,
+                               const char* name,
+                               ValuePtr val_ptr,
+                               int attributes);
 extern void TemplateSetTemplate(TemplatePtr ptr,
                                 const char* name,
                                 TemplatePtr obj_ptr,
@@ -585,6 +589,8 @@ extern RtnValue ObjectGetValueKey(ValuePtr ptr, ValuePtr key_ptr);
 extern void ObjectSetPrivate(ValuePtr ptr, const char* name, ValuePtr val_ptr);
 extern RtnValue ObjectGetPrivate(ValuePtr ptr, const char* name);
 extern void ObjectDeletePrivate(ValuePtr ptr, const char* name);
+extern ValuePtr ContextPrivateSymbol(ContextPtr ctx, const char* name);
+extern RtnValue ContextPrivateSymbolFunction(ContextPtr ctx);
 extern RtnValue ObjectGetIdx(ValuePtr ptr, uint32_t idx);
 extern ValuePtr ObjectGetInternalField(ValuePtr ptr, int idx);
 int ObjectHas(ValuePtr ptr, const char* key);

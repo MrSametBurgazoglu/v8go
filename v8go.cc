@@ -433,6 +433,14 @@ ModifyCodeGenerationFromStringsResult codeGenerationTrampoline(
     Local<Context> context,
     Local<Value> source,
     bool is_code_like) {
+  // eval of a non-string is the identity and compiles nothing: allowed, with
+  // no source, which is what makes V8 hand the value back (Chromium's answer,
+  // and the order the standard's eval-typecheck-callout test pins).
+  if (source.IsEmpty() || !source->IsString()) {
+    ModifyCodeGenerationFromStringsResult identity;
+    identity.codegen_allowed = true;
+    return identity;
+  }
   int ctx_ref = 0;
   Local<Value> ref_val = context->GetEmbedderData(1);
   if (!ref_val.IsEmpty() && ref_val->IsInt32()) {

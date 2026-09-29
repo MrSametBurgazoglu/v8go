@@ -27,6 +27,9 @@ func TestAllowCodeGenerationFromStrings(t *testing.T) {
 			t.Errorf("%s: %v", src, err)
 		}
 	}
+	if v, err := ctx.RunScript(`var a = [1]; eval(a) === a`, "e.js"); err != nil || !v.Boolean() {
+		t.Errorf("eval of a non-string under refusal should be the identity: %v %v", v, err)
+	}
 	if refused != 3 {
 		t.Errorf("the handler heard %d refusals, want 3", refused)
 	}

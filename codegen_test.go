@@ -15,11 +15,20 @@ func TestAllowCodeGenerationFromStrings(t *testing.T) {
 	if v, err := ctx.RunScript(`eval('1+1')`, "a.js"); err != nil || v.Integer() != 2 {
 		t.Fatalf("control: eval before refusing: %v %v", v, err)
 	}
+	refused := 0
+	iso.SetCodeGenerationRefusedHandler(func(c *v8.Context) {
+		if c == ctx {
+			refused++
+		}
+	})
 	ctx.AllowCodeGenerationFromStrings(false, "refused by policy")
 	for _, src := range []string{`eval('1+1')`, `new Function('return 1')()`, `(0, eval)('1')`} {
 		if _, err := ctx.RunScript(src, "b.js"); err == nil || !strings.Contains(err.Error(), "refused by policy") {
 			t.Errorf("%s: %v", src, err)
 		}
+	}
+	if refused != 3 {
+		t.Errorf("the handler heard %d refusals, want 3", refused)
 	}
 	if v, err := ctx.RunScript(`1+2`, "c.js"); err != nil || v.Integer() != 3 {
 		t.Errorf("ordinary script after refusing: %v %v", v, err)

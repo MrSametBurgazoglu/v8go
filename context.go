@@ -241,6 +241,31 @@ func (c *Context) AllowCodeGenerationFromStrings(allow bool, message string) {
 	C.ContextAllowCodeGeneration(c.ptr, flag, cmsg)
 }
 
+// SetCodeGenerationRefusedHandler registers cb to hear each string
+// compilation refused in a context of this isolate that refuses them
+// (Context.AllowCodeGenerationFromStrings(false, ...)): eval, new Function.
+// The refusal stands whatever cb does; cb must not run script.
+func (i *Isolate) SetCodeGenerationRefusedHandler(cb func(*Context)) {
+	if i.ptr == nil {
+		return
+	}
+	codeGenerationCallbacks.Store(i.ptr, cb)
+	C.IsolateSetCodeGenerationRefusedCallback(i.ptr)
+}
+
+var codeGenerationCallbacks sync.Map
+
+//export goCodeGenerationRefused
+func goCodeGenerationRefused(iso C.IsolatePtr, ctxRef C.int) {
+	v, ok := codeGenerationCallbacks.Load(iso)
+	if !ok {
+		return
+	}
+	if cb, ok := v.(func(*Context)); ok {
+		cb(getContext(int(ctxRef)))
+	}
+}
+
 // PerformMicrotaskCheckpoint runs the default MicrotaskQueue until empty.
 // This is used to make progress on Promises.
 func (c *Context) PerformMicrotaskCheckpoint() {

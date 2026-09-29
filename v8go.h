@@ -184,6 +184,9 @@ extern void IsolateAutomaticallyRestoreInitialHeapLimit(IsolatePtr ptr,
 // registry. The rejection value handed to Go is only valid for the
 // callback's synchronous duration — callers must not retain the ValuePtr.
 extern void IsolateSetPromiseRejectCallback(IsolatePtr iso);
+// IsolateSetCodeGenerationRefusedCallback makes V8 tell Go (goCodeGenerationRefused)
+// each time a context that refuses string compilation refuses one.
+extern void IsolateSetCodeGenerationRefusedCallback(IsolatePtr iso);
 // IsolateWarmupOldGenerationHeap forces V8 to commit at least target_bytes
 // of old-generation pages by allocating a non-deduplicated retained buffer
 // inside an internal context, then collecting it. With --no-memory-reducer

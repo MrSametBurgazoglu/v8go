@@ -438,6 +438,7 @@ func (i *Isolate) Dispose() {
 		return
 	}
 	promiseRejectCallbacks.Delete(i.ptr)
+	codeGenerationCallbacks.Delete(i.ptr)
 	C.IsolateDispose(i.ptr)
 	i.ptr = nil
 }

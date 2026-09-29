@@ -423,6 +423,35 @@ void promiseRejectTrampoline(PromiseRejectMessage msg) {
   delete prom;
 }
 
+}  // extern "C" -- the trampoline returns a C++ type
+
+// codeGenerationTrampoline is V8's ModifyCodeGenerationFromStringsCallback2. V8
+// asks it only for a context whose AllowCodeGenerationFromStrings is false, so
+// the answer is always "refuse"; the call exists so the embedder hears of the
+// refusal (a Content Security Policy violation report) with the context's ref.
+ModifyCodeGenerationFromStringsResult codeGenerationTrampoline(
+    Local<Context> context,
+    Local<Value> source,
+    bool is_code_like) {
+  int ctx_ref = 0;
+  Local<Value> ref_val = context->GetEmbedderData(1);
+  if (!ref_val.IsEmpty() && ref_val->IsInt32()) {
+    ctx_ref = ref_val.As<Integer>()->Value();
+  }
+  goCodeGenerationRefused(Isolate::GetCurrent(), ctx_ref);
+  return ModifyCodeGenerationFromStringsResult();
+}
+
+extern "C" {
+
+void IsolateSetCodeGenerationRefusedCallback(IsolatePtr iso) {
+  if (iso == nullptr) {
+    return;
+  }
+  ISOLATE_SCOPE(iso)
+  iso->SetModifyCodeGenerationFromStringsCallback(codeGenerationTrampoline);
+}
+
 void IsolateSetPromiseRejectCallback(IsolatePtr iso) {
   if (iso == nullptr) {
     return;

@@ -253,6 +253,9 @@ extern ContextPtr NewContextAdoptingGlobal(IsolatePtr iso_ptr,
                                            int ref,
                                            int adopt_from);
 extern void ContextSetSecurityToken(ContextPtr ctx_ptr, ValuePtr token_ptr);
+extern void ContextAllowCodeGeneration(ContextPtr ctx_ptr,
+                                       int allow,
+                                       const char* message);
 extern ValuePtr ContextSecurityToken(ContextPtr ctx_ptr);
 
 // ContextRegisterModule registers ES module |source| under |specifier| on the

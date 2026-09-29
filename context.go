@@ -223,6 +223,24 @@ func (c *Context) SetSecurityToken(token *Value) {
 	runtime.KeepAlive(token)
 }
 
+// AllowCodeGenerationFromStrings says whether script in this context may
+// turn a string into code: eval, new Function, the string forms of
+// setTimeout/setInterval that an embedder builds on them. Refused, each throws
+// an EvalError whose message is message — the hook an embedder's Content
+// Security Policy ("script-src" without 'unsafe-eval') needs.
+func (c *Context) AllowCodeGenerationFromStrings(allow bool, message string) {
+	flag := C.int(0)
+	if allow {
+		flag = 1
+	}
+	var cmsg *C.char
+	if !allow && message != "" {
+		cmsg = C.CString(message)
+		defer C.free(unsafe.Pointer(cmsg))
+	}
+	C.ContextAllowCodeGeneration(c.ptr, flag, cmsg)
+}
+
 // PerformMicrotaskCheckpoint runs the default MicrotaskQueue until empty.
 // This is used to make progress on Promises.
 func (c *Context) PerformMicrotaskCheckpoint() {

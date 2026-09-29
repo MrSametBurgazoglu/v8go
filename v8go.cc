@@ -2290,6 +2290,17 @@ void ContextSetSecurityToken(ContextPtr ctx, ValuePtr token_ptr) {
   local_ctx->SetSecurityToken(token_ptr->ptr.Get(iso));
 }
 
+void ContextAllowCodeGeneration(ContextPtr ctx,
+                                int allow,
+                                const char* message) {
+  LOCAL_CONTEXT(ctx);
+  local_ctx->AllowCodeGenerationFromStrings(allow != 0);
+  if (allow == 0 && message != nullptr) {
+    local_ctx->SetErrorMessageForCodeGenerationFromStrings(
+        String::NewFromUtf8(iso, message).ToLocalChecked());
+  }
+}
+
 ValuePtr ContextSecurityToken(ContextPtr ctx) {
   LOCAL_CONTEXT(ctx);
   m_value* val = new m_value;

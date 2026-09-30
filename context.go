@@ -142,6 +142,19 @@ func (c *Context) RetainedValueCount() int {
 	return int(C.ContextRetainedValueCount(c.ptr))
 }
 
+// InUse reports whether the context is being worked in further up the stack:
+// a script or call entered it, or one of its functions is running a Go
+// callback. Close must not be called then — the frames below still write
+// through the context and release values tracked in it on their way out — so
+// an embedder that may tear a context down from inside script asks first. A
+// closed context is not in use.
+func (c *Context) InUse() bool {
+	if c == nil || c.ptr == nil {
+		return false
+	}
+	return C.ContextInUse(c.ptr) != 0
+}
+
 // RunScript executes the source JavaScript; origin (a.k.a. filename) provides a
 // reference for the script and used in the stack trace if there is an error.
 // error will be of type `JSError` if not nil.

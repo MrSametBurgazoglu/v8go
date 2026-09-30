@@ -223,6 +223,7 @@ extern ContextPtr NewContext(IsolatePtr iso_ptr,
                              TemplatePtr global_template_ptr,
                              int ref);
 extern int ContextRetainedValueCount(ContextPtr ctx);
+extern int ContextInUse(ContextPtr ctx);
 extern void ContextFree(ContextPtr ptr);
 extern RtnValue RunScript(ContextPtr ctx_ptr,
                           const char* source,

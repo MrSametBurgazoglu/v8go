@@ -95,6 +95,38 @@ struct m_ctx {
   std::unordered_map<std::string, Global<Module>> moduleRecords;
   Persistent<Context> ptr;
   long nextValId;
+  // use_depth counts the C frames on the stack that are working in this
+  // context: an entry (LOCAL_CONTEXT, LOCAL_VALUE and the explicit scopes that
+  // take a ContextPtr) or a Go callback dispatched for a function or
+  // interceptor the context owns. See ContextInUse.
+  int use_depth = 0;
+  // freed is set when ContextFree ran while the context was in use: the
+  // struct is then deleted by the last ContextUse to leave, not by the free.
+  bool freed = false;
+};
+
+static void contextDelete(m_ctx* ctx);
+
+// ContextUse marks a context in use for the life of one C frame. ContextFree
+// deletes the m_ctx and every m_value tracked in it, so an embedder that frees
+// a context while one of these is live has pulled the struct out from under a
+// caller that will still write through it; ContextInUse is how it asks first.
+struct ContextUse {
+  explicit ContextUse(m_ctx* ctx) : ctx_(ctx) {
+    if (ctx_ != nullptr) {
+      ctx_->use_depth++;
+    }
+  }
+  ~ContextUse() {
+    if (ctx_ != nullptr && --ctx_->use_depth == 0 && ctx_->freed) {
+      contextDelete(ctx_);
+    }
+  }
+  ContextUse(const ContextUse&) = delete;
+  ContextUse& operator=(const ContextUse&) = delete;
+
+ private:
+  m_ctx* ctx_;
 };
 
 struct m_value {
@@ -106,6 +138,18 @@ struct m_value {
   // (ValueSetWeakToken); zero otherwise.
   int64_t weak_token = 0;
 };
+
+// contextDelete deletes a context's struct, and any value tracked in it after
+// ContextFree emptied it (a deferred free's callers may still mint some).
+static void contextDelete(m_ctx* ctx) {
+  for (auto it = ctx->vals.begin(); it != ctx->vals.end(); ++it) {
+    auto value = it->second;
+    value->ptr.Reset();
+    delete value;
+  }
+  ctx->vals.clear();
+  delete ctx;
+}
 
 struct m_template {
   Isolate* iso;
@@ -555,6 +599,9 @@ static MaybeLocal<Promise> hostImportModuleDynamically(
   String::Utf8Value spec_utf8(iso, specifier);
   const char* spec_cstr = *spec_utf8 ? *spec_utf8 : "";
   m_ctx* ctx = recoverModuleContext(context);
+  // The embedder's resolver below is Go, and it runs with this context's
+  // module registry in hand.
+  ContextUse ctx_use(ctx);
   // A specifier the registry has never seen is offered to the embedder's
   // resolver before it is called missing: a bundler's runtime composes chunk
   // URLs as it goes, so the registry cannot be complete in advance. The
@@ -1014,6 +1061,7 @@ TemplatePtr NewObjectTemplate(IsolatePtr iso) {
 
 RtnValue ObjectTemplateNewInstance(TemplatePtr ptr, ContextPtr ctx) {
   LOCAL_TEMPLATE(ptr);
+  ContextUse ctx_use(ctx);
   TryCatch try_catch(iso);
   Local<Context> local_ctx = ctx->ptr.Get(iso);
   Context::Scope context_scope(local_ctx);
@@ -1112,6 +1160,7 @@ static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
     // (js.Runtime.gone) already answers when the call gets as far as Go.
     return;
   }
+  ContextUse ctx_use(ctx);
 
   int callback_ref = info.Data().As<Integer>()->Value();
 
@@ -1238,6 +1287,7 @@ TemplatePtr NewFunctionTemplate(IsolatePtr iso, int callback_ref) {
 
 RtnValue FunctionTemplateGetFunction(TemplatePtr ptr, ContextPtr ctx) {
   LOCAL_TEMPLATE(ptr);
+  ContextUse ctx_use(ctx);
   TryCatch try_catch(iso);
   Local<Context> local_ctx = ctx->ptr.Get(iso);
   Context::Scope context_scope(local_ctx);
@@ -1511,6 +1561,7 @@ RtnValue ObjectTemplateNewWrapper(TemplatePtr ptr,
                                   ValuePtr* vals,
                                   int64_t weak_token) {
   LOCAL_TEMPLATE(ptr);
+  ContextUse ctx_use(ctx);
   TryCatch try_catch(iso);
   Local<Context> local_ctx = ctx->ptr.Get(iso);
   Context::Scope context_scope(local_ctx);
@@ -1560,6 +1611,7 @@ RtnValue NewArrayOfValues(ContextPtr ctx, int n, ValuePtr* vals) {
   Isolate* iso = ctx->iso;
   Locker locker(iso);
   Isolate::Scope isolate_scope(iso);
+  ContextUse ctx_use(ctx);
   HandleScope handle_scope(iso);
   Local<Context> local_ctx = ctx->ptr.Get(iso);
   Context::Scope context_scope(local_ctx);
@@ -1822,6 +1874,7 @@ ValuePtr callInterceptor(Isolate* iso,
                          int ctx_ref,
                          m_ctx* ctx,
                          int callback_ref) {
+  ContextUse ctx_use(ctx);
   m_value* _this = new m_value;
   _this->id = 0;
   _this->iso = iso;
@@ -1916,6 +1969,7 @@ void namedEnumerator(const PropertyCallbackInfo<Array>& info) {
   if (ctx == nullptr) {
     return;
   }
+  ContextUse ctx_use(ctx);
   int callback_ref = info.Data().As<Integer>()->Value();
 
   m_value* _this = new m_value;
@@ -2017,6 +2071,7 @@ void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
   Isolate* iso = ctx->iso;                      \
   Locker locker(iso);                           \
   Isolate::Scope isolate_scope(iso);            \
+  ContextUse ctx_use(ctx);                      \
   HandleScope handle_scope(iso);                \
   TryCatch try_catch(iso);                      \
   Local<Context> local_ctx = ctx->ptr.Get(iso); \
@@ -2129,6 +2184,15 @@ int ContextRetainedValueCount(ContextPtr ctx) {
   return ctx->vals.size();
 }
 
+// ContextInUse reports whether a C frame on the stack is working in the
+// context — an entry into it, or a Go callback it dispatched. Freeing it then
+// would leave that frame writing through a deleted m_ctx and releasing deleted
+// values on its way out; an embedder that tears contexts down from inside
+// script (a frame whose element was removed) asks this first.
+int ContextInUse(ContextPtr ctx) {
+  return ctx != nullptr && ctx->use_depth > 0;
+}
+
 void ContextFree(ContextPtr ctx) {
   if (ctx == nullptr) {
     return;
@@ -2152,8 +2216,15 @@ void ContextFree(ContextPtr ctx) {
   }
   ctx->moduleRecords.clear();
 
-  delete ctx;
+  // Freed from inside a frame still working in it: that frame writes through
+  // the struct on its way out, so it outlives the free until the frame leaves.
+  if (ctx->use_depth > 0) {
+    ctx->freed = true;
+    return;
+  }
+  contextDelete(ctx);
 }
+
 
 RtnValue RunScript(ContextPtr ctx, const char* source, const char* origin) {
   LOCAL_CONTEXT(ctx);
@@ -2377,6 +2448,7 @@ ValuePtr ContextGlobal(ContextPtr ctx) {
     ctx = isolateInternalContext(iso);     \
     local_ctx = ctx->ptr.Get(iso);         \
   }                                        \
+  ContextUse ctx_use(ctx);                 \
   Context::Scope context_scope(local_ctx); \
   Local<Value> value = val->ptr.Get(iso);
 

@@ -578,54 +578,12 @@ static MaybeLocal<Module> resolveModuleCallback(
   return compileRegistryModule(context, specifier);
 }
 
-// hostImportModuleDynamically is the isolate-level host hook fired by
-// `await import(specifier)`. For an in-memory registry the module resolves
-// synchronously: compile -> instantiate -> evaluate -> resolve the returned
-// promise with the module namespace.
-static MaybeLocal<Promise> hostImportModuleDynamically(
-    Local<Context> context, Local<Data> /*host_defined_options*/,
-    Local<Value> resource_name, Local<String> specifier,
-    Local<FixedArray> /*import_attributes*/) {
-  Isolate* iso = Isolate::GetCurrent();
-  ISOLATE_SCOPE(iso)
-  Context::Scope context_scope(context);
-  TryCatch try_catch(iso);
-
-  Local<Promise::Resolver> resolver;
-  if (!Promise::Resolver::New(context).ToLocal(&resolver)) {
-    return MaybeLocal<Promise>();
-  }
-
-  String::Utf8Value spec_utf8(iso, specifier);
-  const char* spec_cstr = *spec_utf8 ? *spec_utf8 : "";
-  m_ctx* ctx = recoverModuleContext(context);
-  // The embedder's resolver below is Go, and it runs with this context's
-  // module registry in hand.
-  ContextUse ctx_use(ctx);
-  // A specifier the registry has never seen is offered to the embedder's
-  // resolver before it is called missing: a bundler's runtime composes chunk
-  // URLs as it goes, so the registry cannot be complete in advance. The
-  // resolver fetches and registers, and the second lookup finds it.
-  if (ctx != nullptr && ctx->modules.find(spec_cstr) == ctx->modules.end()) {
-    String::Utf8Value referrer_utf8(iso, resource_name);
-    const char* referrer_cstr = *referrer_utf8 ? *referrer_utf8 : "";
-    goResolveModule(ctx, const_cast<char*>(spec_cstr),
-                    const_cast<char*>(referrer_cstr));
-  }
-  if (ctx == nullptr ||
-      ctx->modules.find(spec_cstr) == ctx->modules.end()) {
-    std::string errmsg = "Cannot find module '";
-    errmsg += spec_cstr;
-    errmsg += "'";
-    Local<String> msg;
-    if (!String::NewFromUtf8(iso, errmsg.c_str(), NewStringType::kNormal)
-             .ToLocal(&msg)) {
-      return MaybeLocal<Promise>();
-    }
-    resolver->Reject(context, Exception::Error(msg)).Check();
-    return resolver->GetPromise();
-  }
-
+// evaluateDynamicImport is import()'s second half: the registry module under
+// |key| compiled (or found in the module map), instantiated, evaluated, and
+// the promise settled with its namespace or its error.
+static MaybeLocal<Promise> evaluateDynamicImport(
+    Local<Context> context, Local<Promise::Resolver> resolver,
+    Local<String> specifier, TryCatch& try_catch) {
   Local<Module> module;
   if (!compileRegistryModule(context, specifier).ToLocal(&module)) {
     resolver->Reject(context, try_catch.Exception()).Check();
@@ -667,6 +625,135 @@ static MaybeLocal<Promise> hostImportModuleDynamically(
 
   resolver->Resolve(context, module->GetModuleNamespace()).Check();
   return resolver->GetPromise();
+}
+
+// hostImportModuleDynamically is the isolate-level host hook fired by
+// `await import(specifier)`. For an in-memory registry the module resolves
+// synchronously: compile -> instantiate -> evaluate -> resolve the returned
+// promise with the module namespace.
+static MaybeLocal<Promise> hostImportModuleDynamically(
+    Local<Context> context, Local<Data> /*host_defined_options*/,
+    Local<Value> resource_name, Local<String> specifier,
+    Local<FixedArray> import_attributes) {
+  Isolate* iso = Isolate::GetCurrent();
+  ISOLATE_SCOPE(iso)
+  Context::Scope context_scope(context);
+  TryCatch try_catch(iso);
+
+  Local<Promise::Resolver> resolver;
+  if (!Promise::Resolver::New(context).ToLocal(&resolver)) {
+    return MaybeLocal<Promise>();
+  }
+
+  String::Utf8Value spec_utf8(iso, specifier);
+  const char* spec_cstr = *spec_utf8 ? *spec_utf8 : "";
+  m_ctx* ctx = recoverModuleContext(context);
+  // The embedder's resolver below is Go, and it runs with this context's
+  // module registry in hand.
+  ContextUse ctx_use(ctx);
+  // The embedder's import() resolver, when it has one, answers every call
+  // with its import attributes: the registry key of the module it names (a
+  // module is its URL AND its type, so one URL can be two keys), or an error
+  // of the kind HTML specifies, which the promise is rejected with.
+  if (ctx != nullptr) {
+    std::vector<std::string> attr_strings;
+    if (!import_attributes.IsEmpty()) {
+      int length = import_attributes->Length();
+      for (int i = 0; i + 1 < length; i += 2) {
+        Local<Data> key_data = import_attributes->Get(i);
+        Local<Data> value_data = import_attributes->Get(i + 1);
+        if (!key_data->IsValue() || !value_data->IsValue()) {
+          continue;
+        }
+        String::Utf8Value key_utf8(iso, key_data.As<Value>());
+        String::Utf8Value value_utf8(iso, value_data.As<Value>());
+        attr_strings.emplace_back(*key_utf8 ? *key_utf8 : "");
+        attr_strings.emplace_back(*value_utf8 ? *value_utf8 : "");
+      }
+    }
+    std::vector<char*> attr_ptrs;
+    for (auto& a : attr_strings) {
+      attr_ptrs.push_back(const_cast<char*>(a.c_str()));
+    }
+    String::Utf8Value referrer_utf8(iso, resource_name);
+    const char* referrer_cstr = *referrer_utf8 ? *referrer_utf8 : "";
+    char* out_key = nullptr;
+    int out_err_kind = 0;
+    char* out_err_msg = nullptr;
+    int handled = goResolveDynamicImport(
+        ctx, const_cast<char*>(spec_cstr), const_cast<char*>(referrer_cstr),
+        attr_ptrs.empty() ? nullptr : attr_ptrs.data(),
+        static_cast<int>(attr_strings.size() / 2), &out_key, &out_err_kind,
+        &out_err_msg);
+    if (handled == 2) {
+      Local<String> msg =
+          String::NewFromUtf8(iso, out_err_msg ? out_err_msg : "",
+                              NewStringType::kNormal)
+              .ToLocalChecked();
+      free(out_err_msg);
+      Local<Value> error;
+      switch (out_err_kind) {
+        case 1:
+          error = Exception::TypeError(msg);
+          break;
+        case 2:
+          error = Exception::SyntaxError(msg);
+          break;
+        default:
+          error = Exception::Error(msg);
+      }
+      resolver->Reject(context, error).Check();
+      return resolver->GetPromise();
+    }
+    if (handled == 1) {
+      std::string key = out_key ? std::string(out_key) : std::string(spec_cstr);
+      free(out_key);
+      if (ctx->modules.find(key) == ctx->modules.end() &&
+          ctx->moduleRecords.find(key) == ctx->moduleRecords.end()) {
+        std::string errmsg = "Failed to fetch dynamically imported module: ";
+        errmsg += spec_cstr;
+        resolver
+            ->Reject(context,
+                     Exception::TypeError(
+                         String::NewFromUtf8(iso, errmsg.c_str(),
+                                             NewStringType::kNormal)
+                             .ToLocalChecked()))
+            .Check();
+        return resolver->GetPromise();
+      }
+      Local<String> key_str;
+      if (!String::NewFromUtf8(iso, key.c_str(), NewStringType::kNormal)
+               .ToLocal(&key_str)) {
+        return MaybeLocal<Promise>();
+      }
+      return evaluateDynamicImport(context, resolver, key_str, try_catch);
+    }
+  }
+  // A specifier the registry has never seen is offered to the embedder's
+  // resolver before it is called missing: a bundler's runtime composes chunk
+  // URLs as it goes, so the registry cannot be complete in advance. The
+  // resolver fetches and registers, and the second lookup finds it.
+  if (ctx != nullptr && ctx->modules.find(spec_cstr) == ctx->modules.end()) {
+    String::Utf8Value referrer_utf8(iso, resource_name);
+    const char* referrer_cstr = *referrer_utf8 ? *referrer_utf8 : "";
+    goResolveModule(ctx, const_cast<char*>(spec_cstr),
+                    const_cast<char*>(referrer_cstr));
+  }
+  if (ctx == nullptr ||
+      ctx->modules.find(spec_cstr) == ctx->modules.end()) {
+    std::string errmsg = "Cannot find module '";
+    errmsg += spec_cstr;
+    errmsg += "'";
+    Local<String> msg;
+    if (!String::NewFromUtf8(iso, errmsg.c_str(), NewStringType::kNormal)
+             .ToLocal(&msg)) {
+      return MaybeLocal<Promise>();
+    }
+    resolver->Reject(context, Exception::Error(msg)).Check();
+    return resolver->GetPromise();
+  }
+
+  return evaluateDynamicImport(context, resolver, specifier, try_catch);
 }
 
 // hostInitializeImportMeta is fired the first time a module touches

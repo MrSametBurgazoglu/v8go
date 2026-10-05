@@ -289,6 +289,10 @@ func (c *Context) PerformMicrotaskCheckpoint() {
 // Access to any values associated with the context after calling Close may panic.
 func (c *Context) Close() {
 	c.deregister()
+	// The resolvers are keyed by the pointer about to be freed, and a later
+	// context can be given the same address.
+	moduleResolvers.Delete(c.ptr)
+	dynamicImportResolvers.Delete(c.ptr)
 	C.ContextFree(c.ptr)
 	c.ptr = nil
 }

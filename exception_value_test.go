@@ -163,3 +163,23 @@ func TestMissingStaticImportRejects(t *testing.T) {
 		t.Errorf("import() of a graph with a missing module: %v (%v)", got, err)
 	}
 }
+
+// A buffer past the allocator's ceiling is a RangeError, said before any
+// allocation is tried.
+func TestArrayBufferPastTheCeilingIsARangeError(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+	ctx := v8.NewContext(iso)
+	defer ctx.Close()
+
+	got, err := ctx.RunScript(`
+		const out = [];
+		for (const n of [7 * 1125899906842624, 2 ** 53 - 1, 2 ** 31]) {
+			try { new ArrayBuffer(n); out.push('made'); } catch (e) { out.push(e.name); }
+		}
+		out.push(new ArrayBuffer(1024).byteLength);
+		out.join('|')`, "big.js")
+	if err != nil || got.String() != "RangeError|RangeError|RangeError|1024" {
+		t.Errorf("oversized ArrayBuffers: %v (%v)", got, err)
+	}
+}

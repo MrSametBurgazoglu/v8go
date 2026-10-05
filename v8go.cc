@@ -67,6 +67,12 @@ class BoundedArrayBufferAllocator : public ArrayBuffer::Allocator {
 
   void Free(void* data, size_t) override { free(data); }
 
+  // Said up front, so V8 throws its RangeError for a length past the ceiling
+  // without trying: a refused Allocate() first makes V8 collect garbage to
+  // make room, three times over, and that pressure reached the embedder's
+  // near-heap-limit callback -- which ends the page for asking.
+  size_t MaxAllocationSize() const override { return ceiling_; }
+
  private:
   size_t ceiling_;
 };

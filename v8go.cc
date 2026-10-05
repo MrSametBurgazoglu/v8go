@@ -567,7 +567,8 @@ static MaybeLocal<Module> compileRegistryModule(Local<Context> context,
     return MaybeLocal<Module>();
   }
   Local<String> src;
-  if (!String::NewFromUtf8(iso, it->second.c_str(), NewStringType::kNormal)
+  if (!String::NewFromUtf8(iso, it->second.data(), NewStringType::kNormal,
+                           static_cast<int>(it->second.size()))
            .ToLocal(&src)) {
     return MaybeLocal<Module>();
   }
@@ -863,8 +864,9 @@ static void hostInitializeImportMeta(Local<Context> context,
 // the dynamic-import host hook can compile it. Registered on the context; the
 // hook recovers the same context via the ctx_ref embedder slot.
 void ContextRegisterModule(ContextPtr ctx, const char* specifier,
-                           const char* source) {
-  ctx->modules[specifier] = source;
+                           const char* source, int source_len) {
+  // By length: a module's text may hold U+0000, which a C string would end at.
+  ctx->modules[specifier] = std::string(source, source_len);
   // New source under a specifier retires the record compiled from the old
   // source; otherwise a second document would import the previous page's
   // module.
@@ -967,6 +969,7 @@ IsolateHStatistics IsolationGetHeapStatistics(IsolatePtr iso) {
 
 RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso,
                                              const char* s,
+                                             int s_len,
                                              const char* o,
                                              CompileOptions opts) {
   ISOLATE_SCOPE_INTERNAL_CONTEXT(iso);
@@ -977,7 +980,8 @@ RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso,
   RtnUnboundScript rtn = {};
 
   Local<String> src =
-      String::NewFromUtf8(iso, s, NewStringType::kNormal).ToLocalChecked();
+      String::NewFromUtf8(iso, s, NewStringType::kNormal, s_len)
+          .ToLocalChecked();
   Local<String> ogn =
       String::NewFromUtf8(iso, o, NewStringType::kNormal).ToLocalChecked();
 
@@ -1015,7 +1019,10 @@ RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso,
 // IsolateCheckModuleSyntax parses s as a module and keeps nothing: what an
 // embedder that fetches a module graph itself needs to know before it fetches
 // a module's imports, since a module that does not parse has none.
-RtnError IsolateCheckModuleSyntax(IsolatePtr iso, const char* s, const char* o) {
+RtnError IsolateCheckModuleSyntax(IsolatePtr iso,
+                                  const char* s,
+                                  int s_len,
+                                  const char* o) {
   ISOLATE_SCOPE_INTERNAL_CONTEXT(iso);
   TryCatch try_catch(iso);
   Local<Context> local_ctx = ctx->ptr.Get(iso);
@@ -1024,7 +1031,8 @@ RtnError IsolateCheckModuleSyntax(IsolatePtr iso, const char* s, const char* o) 
   RtnError rtn = {nullptr, nullptr, nullptr};
   Local<String> src;
   Local<String> ogn;
-  if (!String::NewFromUtf8(iso, s, NewStringType::kNormal).ToLocal(&src) ||
+  if (!String::NewFromUtf8(iso, s, NewStringType::kNormal, s_len)
+           .ToLocal(&src) ||
       !String::NewFromUtf8(iso, o, NewStringType::kNormal).ToLocal(&ogn)) {
     return rtn;
   }
@@ -2482,13 +2490,18 @@ void ContextFree(ContextPtr ctx) {
 }
 
 
-RtnValue RunScript(ContextPtr ctx, const char* source, const char* origin) {
+RtnValue RunScript(ContextPtr ctx,
+                   const char* source,
+                   int source_len,
+                   const char* origin) {
   LOCAL_CONTEXT(ctx);
 
   RtnValue rtn = {};
 
+  // By length: a script's text may hold U+0000, which a C string would end
+  // at — and the script would then fail to parse, or run truncated.
   MaybeLocal<String> maybeSrc =
-      String::NewFromUtf8(iso, source, NewStringType::kNormal);
+      String::NewFromUtf8(iso, source, NewStringType::kNormal, source_len);
   MaybeLocal<String> maybeOgn =
       String::NewFromUtf8(iso, origin, NewStringType::kNormal);
   Local<String> src, ogn;

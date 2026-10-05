@@ -383,7 +383,7 @@ func (i *Isolate) CheckModuleSyntax(source, origin string) error {
 	cOrigin := C.CString(origin)
 	defer C.free(unsafe.Pointer(cSource))
 	defer C.free(unsafe.Pointer(cOrigin))
-	rtn := C.IsolateCheckModuleSyntax(i.ptr, cSource, cOrigin)
+	rtn := C.IsolateCheckModuleSyntax(i.ptr, cSource, C.int(len(source)), cOrigin)
 	if rtn.msg == nil {
 		return nil
 	}
@@ -415,7 +415,7 @@ func (i *Isolate) CompileUnboundScript(source, origin string, opts CompileOption
 		cOptions.compileOption = C.int(opts.Mode)
 	}
 
-	rtn := C.IsolateCompileUnboundScript(i.ptr, cSource, cOrigin, cOptions)
+	rtn := C.IsolateCompileUnboundScript(i.ptr, cSource, C.int(len(source)), cOrigin, cOptions)
 	if rtn.ptr == nil {
 		return nil, newJSError(rtn.error)
 	}

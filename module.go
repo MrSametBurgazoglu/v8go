@@ -26,7 +26,7 @@ func (c *Context) RegisterModule(spec string, source string) {
 	cSource := C.CString(source)
 	defer C.free(unsafe.Pointer(cSpec))
 	defer C.free(unsafe.Pointer(cSource))
-	C.ContextRegisterModule(c.ptr, cSpec, cSource)
+	C.ContextRegisterModule(c.ptr, cSpec, cSource, C.int(len(source)))
 }
 
 // moduleResolvers holds the on-demand module loader for each context, keyed

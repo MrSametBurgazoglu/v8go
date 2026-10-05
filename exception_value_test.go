@@ -85,3 +85,32 @@ func TestDynamicImportWaitsForTopLevelAwait(t *testing.T) {
 		t.Errorf("import() results\n got %s\nwant %s", got.String(), want)
 	}
 }
+
+// A script's text is passed by length: U+0000 inside it is a character, not
+// the end of the source.
+func TestSourceKeepsNUL(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+	ctx := v8.NewContext(iso)
+	defer ctx.Close()
+
+	got, err := ctx.RunScript("'a\x00b'.length", "nul.js")
+	if err != nil || got.Int32() != 3 {
+		t.Errorf("RunScript: %v %v", got, err)
+	}
+	script, err := iso.CompileUnboundScript("'a\x00bc'.length", "nul2.js", v8.CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := script.Run(ctx); err != nil || got.Int32() != 4 {
+		t.Errorf("CompileUnboundScript: %v %v", got, err)
+	}
+	ctx.RegisterModule("nul.mjs", "export const n = 'a\x00bcd'.length;")
+	if _, err := ctx.RunScript(`import('nul.mjs').then(ns => globalThis.n = ns.n)`, "m.js"); err != nil {
+		t.Fatal(err)
+	}
+	iso.PerformMicrotaskCheckpoint()
+	if got, err := ctx.RunScript(`globalThis.n`, "r.js"); err != nil || got.Int32() != 5 {
+		t.Errorf("RegisterModule: %v %v", got, err)
+	}
+}

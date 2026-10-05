@@ -164,7 +164,7 @@ func (c *Context) RunScript(source string, origin string) (*Value, error) {
 	defer C.free(unsafe.Pointer(cSource))
 	defer C.free(unsafe.Pointer(cOrigin))
 
-	rtn := C.RunScript(c.ptr, cSource, cOrigin)
+	rtn := C.RunScript(c.ptr, cSource, C.int(len(source)), cOrigin)
 	return valueResult(c, rtn)
 }
 

@@ -114,3 +114,52 @@ func TestSourceKeepsNUL(t *testing.T) {
 		t.Errorf("RegisterModule: %v %v", got, err)
 	}
 }
+
+// import() evaluates in a reaction, not inside the call: a module importing
+// a sibling its graph has linked but not yet run finishes its own body
+// first, and the sibling then runs in the graph's order.
+func TestDynamicImportEvaluatesAfterTheImporter(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+	ctx := v8.NewContext(iso)
+	defer ctx.Close()
+
+	ctx.RegisterModule("root.js", `import "a.js"; import "b.js";
+		export function record(name) {
+			record.order = (record.order || "") + name;
+			return record.order;
+		}`)
+	ctx.RegisterModule("a.js", `import { record } from "root.js";
+		globalThis.later = import("b.js").then(() => record(""));
+		record("A");`)
+	ctx.RegisterModule("b.js", `import { record } from "root.js"; record("B");`)
+	if _, err := ctx.RunScript(`import("root.js").then(() => later).then(s => globalThis.got = s, e => globalThis.got = "error: " + e)`, "main.js"); err != nil {
+		t.Fatal(err)
+	}
+	iso.PerformMicrotaskCheckpoint()
+	got, err := ctx.RunScript(`globalThis.got`, "read.js")
+	if err != nil || got.String() != "AB" {
+		t.Errorf("evaluation order %v (%v), want AB", got, err)
+	}
+}
+
+// A static import the registry cannot answer rejects import() with a
+// TypeError. V8 failed the instantiation with no exception, and the
+// rejection with nothing in hand took the process down.
+func TestMissingStaticImportRejects(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+	ctx := v8.NewContext(iso)
+	defer ctx.Close()
+
+	ctx.RegisterModule("root.js", `import "nowhere.js";`)
+	if _, err := ctx.RunScript(`import("root.js").then(() => globalThis.got = "fulfilled",
+		e => globalThis.got = e.name + ": " + e.message)`, "main.js"); err != nil {
+		t.Fatal(err)
+	}
+	iso.PerformMicrotaskCheckpoint()
+	got, err := ctx.RunScript(`globalThis.got`, "read.js")
+	if err != nil || got.String() != "TypeError: Cannot find module 'nowhere.js'" {
+		t.Errorf("import() of a graph with a missing module: %v (%v)", got, err)
+	}
+}

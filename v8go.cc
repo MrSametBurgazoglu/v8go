@@ -593,7 +593,31 @@ static MaybeLocal<Module> compileRegistryModule(Local<Context> context,
 static MaybeLocal<Module> resolveModuleCallback(
     Local<Context> context, Local<String> specifier,
     Local<FixedArray> /*import_attributes*/, Local<Module> /*referrer*/) {
-  return compileRegistryModule(context, specifier);
+  MaybeLocal<Module> module = compileRegistryModule(context, specifier);
+  // A miss throws nothing of its own, and V8 then fails the instantiation
+  // with no exception at all: import() had nothing to reject with.
+  Isolate* iso = Isolate::GetCurrent();
+  if (module.IsEmpty() && !iso->HasPendingException()) {
+    String::Utf8Value spec_utf8(iso, specifier);
+    std::string message = "Cannot find module '";
+    message += *spec_utf8 ? *spec_utf8 : "";
+    message += "'";
+    iso->ThrowException(Exception::TypeError(
+        String::NewFromUtf8(iso, message.c_str(), NewStringType::kNormal)
+            .ToLocalChecked()));
+  }
+  return module;
+}
+
+// caughtOrError is what a failed step rejects import() with: the exception it
+// threw, or an Error when it failed without one (a context closed before a
+// deferred evaluation ran has no module registry left to compile from).
+static Local<Value> caughtOrError(Isolate* iso, TryCatch& try_catch) {
+  if (try_catch.HasCaught() && !try_catch.Exception().IsEmpty()) {
+    return try_catch.Exception();
+  }
+  return Exception::Error(
+      String::NewFromUtf8Literal(iso, "the module could not be evaluated"));
 }
 
 // evaluateDynamicImport is import()'s second half: the registry module under
@@ -604,7 +628,9 @@ static MaybeLocal<Promise> evaluateDynamicImport(
     Local<String> specifier, TryCatch& try_catch) {
   Local<Module> module;
   if (!compileRegistryModule(context, specifier).ToLocal(&module)) {
-    resolver->Reject(context, try_catch.Exception()).Check();
+    resolver
+        ->Reject(context, caughtOrError(Isolate::GetCurrent(), try_catch))
+        .Check();
     return resolver->GetPromise();
   }
 
@@ -621,7 +647,9 @@ static MaybeLocal<Promise> evaluateDynamicImport(
   if (status == Module::kUninstantiated) {
     if (!module->InstantiateModule(context, resolveModuleCallback)
              .FromMaybe(false)) {
-      resolver->Reject(context, try_catch.Exception()).Check();
+      resolver
+          ->Reject(context, caughtOrError(Isolate::GetCurrent(), try_catch))
+          .Check();
       return resolver->GetPromise();
     }
     status = module->GetStatus();
@@ -640,7 +668,9 @@ static MaybeLocal<Promise> evaluateDynamicImport(
   if (status == Module::kInstantiated || status == Module::kEvaluated) {
     Local<Value> evaluation;
     if (!module->Evaluate(context).ToLocal(&evaluation)) {
-      resolver->Reject(context, try_catch.Exception()).Check();
+      resolver
+          ->Reject(context, caughtOrError(Isolate::GetCurrent(), try_catch))
+          .Check();
       return resolver->GetPromise();
     }
     if (module->GetStatus() == Module::kErrored) {
@@ -701,6 +731,70 @@ static MaybeLocal<Promise> evaluateDynamicImport(
   }
 
   resolver->Resolve(context, module->GetModuleNamespace()).Check();
+  return resolver->GetPromise();
+}
+
+// deferDynamicImport runs evaluateDynamicImport as a microtask rather than
+// inside the import() call. HTML's import() links and evaluates in a reaction
+// to the load promise, so a module importing a sibling the graph has fetched
+// but not yet evaluated finishes its own body first: evaluating at once ran
+// the sibling ahead of the importer, out of the graph's depth-first order.
+static MaybeLocal<Promise> deferDynamicImport(Local<Context> context,
+                                              Local<Promise::Resolver> resolver,
+                                              Local<String> key) {
+  Isolate* iso = Isolate::GetCurrent();
+  Local<Array> data = Array::New(iso, 2);
+  data->Set(context, 0, resolver).Check();
+  data->Set(context, 1, key).Check();
+  Local<Function> task;
+  if (!Function::New(
+           context,
+           [](const FunctionCallbackInfo<Value>& info) {
+             Isolate* iso = info.GetIsolate();
+             Local<Context> c = iso->GetCurrentContext();
+             Local<Array> d = info.Data().As<Array>();
+             Local<Promise::Resolver> r =
+                 d->Get(c, 0).ToLocalChecked().As<Promise::Resolver>();
+             Local<String> k = d->Get(c, 1).ToLocalChecked().As<String>();
+             TryCatch try_catch(iso);
+             evaluateDynamicImport(c, r, k, try_catch);
+           },
+           data)
+           .ToLocal(&task)) {
+    return MaybeLocal<Promise>();
+  }
+  iso->EnqueueMicrotask(task);
+  return resolver->GetPromise();
+}
+
+// deferDynamicImportFailure rejects import() from a microtask too, so calls
+// settle in the order they were made whether they fail or not.
+static MaybeLocal<Promise> deferDynamicImportFailure(
+    Local<Context> context,
+    Local<Promise::Resolver> resolver,
+    Local<Value> error) {
+  Isolate* iso = Isolate::GetCurrent();
+  Local<Array> data = Array::New(iso, 2);
+  data->Set(context, 0, resolver).Check();
+  data->Set(context, 1, error).Check();
+  Local<Function> task;
+  if (!Function::New(
+           context,
+           [](const FunctionCallbackInfo<Value>& info) {
+             Local<Context> c = info.GetIsolate()->GetCurrentContext();
+             Local<Array> d = info.Data().As<Array>();
+             d->Get(c, 0)
+                 .ToLocalChecked()
+                 .As<Promise::Resolver>()
+                 ->Reject(c, d->Get(c, 1).ToLocalChecked())
+                 .Check();
+           },
+           data)
+           .ToLocal(&task)) {
+    resolver->Reject(context, error).Check();
+    return resolver->GetPromise();
+  }
+  iso->EnqueueMicrotask(task);
   return resolver->GetPromise();
 }
 
@@ -779,8 +873,7 @@ static MaybeLocal<Promise> hostImportModuleDynamically(
         default:
           error = Exception::Error(msg);
       }
-      resolver->Reject(context, error).Check();
-      return resolver->GetPromise();
+      return deferDynamicImportFailure(context, resolver, error);
     }
     if (handled == 1) {
       std::string key = out_key ? std::string(out_key) : std::string(spec_cstr);
@@ -789,21 +882,18 @@ static MaybeLocal<Promise> hostImportModuleDynamically(
           ctx->moduleRecords.find(key) == ctx->moduleRecords.end()) {
         std::string errmsg = "Failed to fetch dynamically imported module: ";
         errmsg += spec_cstr;
-        resolver
-            ->Reject(context,
-                     Exception::TypeError(
-                         String::NewFromUtf8(iso, errmsg.c_str(),
-                                             NewStringType::kNormal)
-                             .ToLocalChecked()))
-            .Check();
-        return resolver->GetPromise();
+        return deferDynamicImportFailure(
+            context, resolver,
+            Exception::TypeError(String::NewFromUtf8(iso, errmsg.c_str(),
+                                                     NewStringType::kNormal)
+                                     .ToLocalChecked()));
       }
       Local<String> key_str;
       if (!String::NewFromUtf8(iso, key.c_str(), NewStringType::kNormal)
                .ToLocal(&key_str)) {
         return MaybeLocal<Promise>();
       }
-      return evaluateDynamicImport(context, resolver, key_str, try_catch);
+      return deferDynamicImport(context, resolver, key_str);
     }
   }
   // A specifier the registry has never seen is offered to the embedder's
@@ -826,11 +916,10 @@ static MaybeLocal<Promise> hostImportModuleDynamically(
              .ToLocal(&msg)) {
       return MaybeLocal<Promise>();
     }
-    resolver->Reject(context, Exception::Error(msg)).Check();
-    return resolver->GetPromise();
+    return deferDynamicImportFailure(context, resolver, Exception::Error(msg));
   }
 
-  return evaluateDynamicImport(context, resolver, specifier, try_catch);
+  return deferDynamicImport(context, resolver, specifier);
 }
 
 // hostInitializeImportMeta is fired the first time a module touches

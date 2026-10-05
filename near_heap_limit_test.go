@@ -133,4 +133,3 @@ func TestSetNearHeapLimitGrowthBytes_RoundTrip(t *testing.T) {
 	v8.SetNearHeapLimitGrowthBytes(1 << 30)
 	v8.SetNearHeapLimitGrowthBytes(256 * 1024 * 1024)
 }
-

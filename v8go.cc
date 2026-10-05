@@ -104,6 +104,10 @@ struct m_ctx {
   // freed is set when ContextFree ran while the context was in use: the
   // struct is then deleted by the last ContextUse to leave, not by the free.
   bool freed = false;
+  // lastException is the value behind the most recent RtnError the isolate
+  // produced, on the isolate's internal context only (ContextTakeException).
+  // Weak: an error nobody asks for must not keep its realm alive.
+  Global<Value> lastException;
 };
 
 static void contextDelete(m_ctx* ctx);
@@ -197,6 +201,13 @@ static RtnError ExceptionError(TryCatch& try_catch,
 
   String::Utf8Value exception(iso, try_catch.Exception());
   rtn.msg = CopyString(exception);
+
+  // The thrown value itself, for an embedder that reports it: an ErrorEvent's
+  // `error` is the object the script threw, not its text.
+  if (m_ctx* ictx = static_cast<m_ctx*>(iso->GetData(0))) {
+    ictx->lastException.Reset(iso, try_catch.Exception());
+    ictx->lastException.SetWeak();
+  }
 
   Local<Message> msg = try_catch.Message();
   if (!msg.IsEmpty()) {
@@ -618,14 +629,73 @@ static MaybeLocal<Promise> evaluateDynamicImport(
   // Evaluate returns a Promise per spec. A module without top-level await
   // settles it synchronously; a module-level throw lands in kErrored (not in
   // try_catch), so the status must be inspected explicitly.
-  if (status == Module::kInstantiated) {
-    if (module->Evaluate(context).IsEmpty()) {
+  //
+  // A module with top-level await (or one importing such a module) settles
+  // it later, and import() settles with it: resolving with the namespace at
+  // once handed out bindings still in their TDZ and swallowed a rejected
+  // await. An evaluated module is evaluated again for the same reason, as
+  // HTML's import() does: Evaluate answers the promise its evaluation
+  // already has, which is still pending while an await in it is.
+  if (status == Module::kInstantiated || status == Module::kEvaluated) {
+    Local<Value> evaluation;
+    if (!module->Evaluate(context).ToLocal(&evaluation)) {
       resolver->Reject(context, try_catch.Exception()).Check();
       return resolver->GetPromise();
     }
     if (module->GetStatus() == Module::kErrored) {
       resolver->Reject(context, module->GetException()).Check();
       return resolver->GetPromise();
+    }
+    if (evaluation->IsPromise()) {
+      Local<Promise> promise = evaluation.As<Promise>();
+      switch (promise->State()) {
+        case Promise::kRejected:
+          resolver->Reject(context, promise->Result()).Check();
+          return resolver->GetPromise();
+        case Promise::kPending: {
+          Isolate* iso = Isolate::GetCurrent();
+          Local<Array> data = Array::New(iso, 2);
+          data->Set(context, 0, resolver).Check();
+          data->Set(context, 1, module->GetModuleNamespace()).Check();
+          Local<Function> fulfilled;
+          Local<Function> rejected;
+          if (!Function::New(
+                   context,
+                   [](const FunctionCallbackInfo<Value>& info) {
+                     Local<Context> c = info.GetIsolate()->GetCurrentContext();
+                     Local<Array> d = info.Data().As<Array>();
+                     d->Get(c, 0)
+                         .ToLocalChecked()
+                         .As<Promise::Resolver>()
+                         ->Resolve(c, d->Get(c, 1).ToLocalChecked())
+                         .Check();
+                   },
+                   data)
+                   .ToLocal(&fulfilled) ||
+              !Function::New(
+                   context,
+                   [](const FunctionCallbackInfo<Value>& info) {
+                     Local<Context> c = info.GetIsolate()->GetCurrentContext();
+                     Local<Array> d = info.Data().As<Array>();
+                     d->Get(c, 0)
+                         .ToLocalChecked()
+                         .As<Promise::Resolver>()
+                         ->Reject(c, info[0])
+                         .Check();
+                   },
+                   data)
+                   .ToLocal(&rejected) ||
+              promise->Then(context, fulfilled, rejected).IsEmpty()) {
+            Local<Value> failure = try_catch.HasCaught()
+                                       ? try_catch.Exception()
+                                       : Undefined(iso).As<Value>();
+            resolver->Reject(context, failure).Check();
+          }
+          return resolver->GetPromise();
+        }
+        default:
+          break;
+      }
     }
   }
 
@@ -939,6 +1009,32 @@ RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso,
   m_unboundScript* us = new m_unboundScript;
   us->ptr.Reset(iso, unbound_script);
   rtn.ptr = tracked_unbound_script(ctx, us);
+  return rtn;
+}
+
+// IsolateCheckModuleSyntax parses s as a module and keeps nothing: what an
+// embedder that fetches a module graph itself needs to know before it fetches
+// a module's imports, since a module that does not parse has none.
+RtnError IsolateCheckModuleSyntax(IsolatePtr iso, const char* s, const char* o) {
+  ISOLATE_SCOPE_INTERNAL_CONTEXT(iso);
+  TryCatch try_catch(iso);
+  Local<Context> local_ctx = ctx->ptr.Get(iso);
+  Context::Scope context_scope(local_ctx);
+
+  RtnError rtn = {nullptr, nullptr, nullptr};
+  Local<String> src;
+  Local<String> ogn;
+  if (!String::NewFromUtf8(iso, s, NewStringType::kNormal).ToLocal(&src) ||
+      !String::NewFromUtf8(iso, o, NewStringType::kNormal).ToLocal(&ogn)) {
+    return rtn;
+  }
+  ScriptOrigin origin(ogn, 0, 0, false, -1, Local<Value>(), false, false,
+                      true);
+  ScriptCompiler::Source source(src, origin);
+  Local<Module> module;
+  if (!ScriptCompiler::CompileModule(iso, &source).ToLocal(&module)) {
+    rtn = ExceptionError(try_catch, iso, local_ctx);
+  }
   return rtn;
 }
 
@@ -2576,6 +2672,31 @@ ValuePtr ContextSecurityToken(ContextPtr ctx) {
   val->iso = iso;
   val->ctx = ctx;
   val->ptr = Global<Value>(iso, local_ctx->GetSecurityToken());
+  return tracked_value(ctx, val);
+}
+
+ValuePtr ContextTakeException(ContextPtr ctx) {
+  LOCAL_CONTEXT(ctx);
+  m_ctx* ictx = isolateInternalContext(iso);
+  if (ictx == nullptr || ictx->lastException.IsEmpty()) {
+    return nullptr;
+  }
+  Local<Value> exception = ictx->lastException.Get(iso);
+  ictx->lastException.Reset();
+  // An error the embedder's own compile raised belongs to the internal
+  // context; handing it to a page would hand the page that realm.
+  if (exception->IsObject() && ictx != ctx) {
+    Local<Context> creation;
+    if (exception.As<Object>()->GetCreationContext(iso).ToLocal(&creation) &&
+        creation == ictx->ptr.Get(iso)) {
+      return nullptr;
+    }
+  }
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, exception);
   return tracked_value(ctx, val);
 }
 

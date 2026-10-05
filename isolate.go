@@ -375,6 +375,21 @@ type CompileOptions struct {
 	Mode CompileMode
 }
 
+// CheckModuleSyntax parses source as a module and reports its early error,
+// if it has one, as a JSError; nothing is compiled for later. origin names
+// the module in the error's location.
+func (i *Isolate) CheckModuleSyntax(source, origin string) error {
+	cSource := C.CString(source)
+	cOrigin := C.CString(origin)
+	defer C.free(unsafe.Pointer(cSource))
+	defer C.free(unsafe.Pointer(cOrigin))
+	rtn := C.IsolateCheckModuleSyntax(i.ptr, cSource, cOrigin)
+	if rtn.msg == nil {
+		return nil
+	}
+	return newJSError(rtn)
+}
+
 // CompileUnboundScript will create an UnboundScript (i.e. context-indepdent)
 // using the provided source JavaScript, origin (a.k.a. filename), and options.
 // If options contain a non-null CachedData, compilation of the script will use

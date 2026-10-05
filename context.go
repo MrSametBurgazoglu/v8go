@@ -168,6 +168,18 @@ func (c *Context) RunScript(source string, origin string) (*Value, error) {
 	return valueResult(c, rtn)
 }
 
+// TakeException returns the value thrown by the most recent JavaScript
+// exception that came back to Go as a JSError on this context's isolate, and
+// forgets it; nil when it was already taken or has been collected. Call it
+// straight after the call that failed: the next JSError replaces it.
+func (c *Context) TakeException() *Value {
+	ptr := C.ContextTakeException(c.ptr)
+	if ptr == nil {
+		return nil
+	}
+	return &Value{ptr, c}
+}
+
 // Global returns the global proxy object.
 // Global proxy object is a thin wrapper whose prototype points to actual
 // context's global object with the properties like Object, etc. This is

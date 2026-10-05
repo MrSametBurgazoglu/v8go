@@ -201,6 +201,9 @@ extern int IsolateWarmupOldGenerationHeap(IsolatePtr ptr,
 
 extern ValuePtr IsolateThrowException(IsolatePtr iso, ValuePtr value);
 
+extern RtnError IsolateCheckModuleSyntax(IsolatePtr iso_ptr,
+                                         const char* s,
+                                         const char* o);
 extern RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso_ptr,
                                                     const char* source,
                                                     const char* origin,
@@ -257,6 +260,7 @@ extern RtnValue RunScript(ContextPtr ctx_ptr,
 extern RtnValue JSONParse(ContextPtr ctx_ptr, const char* str);
 const char* JSONStringify(ContextPtr ctx_ptr, ValuePtr val_ptr);
 extern ValuePtr ContextGlobal(ContextPtr ctx_ptr);
+extern ValuePtr ContextTakeException(ContextPtr ctx_ptr);
 
 // ContextKeepGlobal detaches |ctx|'s global proxy and parks it under |ref| —
 // the context's own reference number — for a later NewContextAdoptingGlobal

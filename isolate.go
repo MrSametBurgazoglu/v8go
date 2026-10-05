@@ -373,6 +373,14 @@ type CompileOptions struct {
 	CachedData *CompilerCachedData
 
 	Mode CompileMode
+
+	// Opaque compiles the script with an opaque origin (V8's ScriptOrigin
+	// is_opaque, and not shared cross-origin): a script the embedder fetched
+	// from another origin without CORS. An exception thrown by its code — at
+	// its top level, or later from a function it defined — or by its
+	// compile, comes back as a JSError whose Opaque is true. HTML calls this
+	// the script's "muted errors".
+	Opaque bool
 }
 
 // CheckModuleSyntax parses source as a module and reports its early error,
@@ -413,6 +421,9 @@ func (i *Isolate) CompileUnboundScript(source, origin string, opts CompileOption
 		}
 	} else {
 		cOptions.compileOption = C.int(opts.Mode)
+	}
+	if opts.Opaque {
+		cOptions.opaque = 1
 	}
 
 	rtn := C.IsolateCompileUnboundScript(i.ptr, cSource, C.int(len(source)), cOrigin, cOptions)

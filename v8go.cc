@@ -211,6 +211,7 @@ static RtnError ExceptionError(TryCatch& try_catch,
 
   Local<Message> msg = try_catch.Message();
   if (!msg.IsEmpty()) {
+    rtn.opaque = msg->IsOpaque() ? 1 : 0;
     String::Utf8Value origin(iso, msg->GetScriptOrigin().ResourceName().As<Value>());
     std::ostringstream sb;
     sb << *origin;
@@ -1084,7 +1085,12 @@ RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso,
                                                  opts.cachedData.length);
   }
 
-  ScriptOrigin script_origin(ogn);
+  // An opaque script is one the embedder fetched from another origin without
+  // CORS: the message of anything it throws says so (Message::IsOpaque), and
+  // the embedder mutes what it reports. Not shared cross-origin either, as
+  // Blink compiles such a script.
+  ScriptOrigin script_origin(ogn, 0, 0, false, -1, Local<Value>(),
+                             opts.opaque != 0);
 
   ScriptCompiler::Source source(src, script_origin, cached_data);
 

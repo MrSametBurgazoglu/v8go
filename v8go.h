@@ -67,6 +67,9 @@ typedef struct {
   const char* msg;
   const char* location;
   const char* stack;
+  // opaque is the thrower's ScriptOrigin is_opaque bit (v8::Message::IsOpaque):
+  // the exception came from a script compiled with CompileOptions.opaque.
+  int opaque;
 } RtnError;
 
 typedef struct {
@@ -85,6 +88,9 @@ typedef struct {
 typedef struct {
   ScriptCompilerCachedData cachedData;
   int compileOption;
+  // opaque compiles the script with ScriptOrigin is_opaque=true (and
+  // is_shared_cross_origin=false): a script whose errors the embedder mutes.
+  int opaque;
 } CompileOptions;
 
 typedef struct {

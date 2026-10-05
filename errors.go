@@ -20,6 +20,10 @@ type JSError struct {
 	Message    string
 	Location   string
 	StackTrace string
+	// Opaque says the exception was thrown from a script compiled with
+	// CompileOptions.Opaque (v8::Message::IsOpaque): an embedder implementing
+	// HTML's muted errors reports it as "Script error." with no location.
+	Opaque bool
 }
 
 func newJSError(rtnErr C.RtnError) error {
@@ -27,6 +31,7 @@ func newJSError(rtnErr C.RtnError) error {
 		Message:    C.GoString(rtnErr.msg),
 		Location:   C.GoString(rtnErr.location),
 		StackTrace: C.GoString(rtnErr.stack),
+		Opaque:     rtnErr.opaque != 0,
 	}
 	C.free(unsafe.Pointer(rtnErr.msg))
 	C.free(unsafe.Pointer(rtnErr.location))

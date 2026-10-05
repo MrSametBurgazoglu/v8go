@@ -222,6 +222,32 @@ extern void CPUProfileDelete(CPUProfile* ptr);
 extern ContextPtr NewContext(IsolatePtr iso_ptr,
                              TemplatePtr global_template_ptr,
                              int ref);
+
+// RegisterExtensionSource registers a V8 extension: a script V8 compiles as
+// EMBEDDER code and runs while building every context configured to install
+// it (IsolateSetContextExtensions). Functions an extension's source defines
+// are not user JavaScript to V8 -- Function.prototype.toString answers
+// "function f() { [native code] }" for them, as for any built-in -- which is
+// what makes it the embedder's way to implement built-ins in JavaScript.
+//
+// |source| must be one-byte (Latin-1) text, |source_len| bytes; |deps| names
+// extensions this one needs installed first. The name, source and deps are
+// copied and kept for the life of the process, which is how long V8 keeps
+// the extension.
+extern void RegisterExtensionSource(const char* name,
+                                    const char* source,
+                                    int source_len,
+                                    const char** deps,
+                                    int dep_count);
+
+// IsolateSetContextExtensions names the extensions every context created in
+// |iso_ptr| from now on installs, in addition to V8's auto-enabled ones. An
+// empty list restores the default. An extension that fails while a context
+// is built makes that context's creation fail in V8; register only sources
+// that cannot throw at their top level.
+extern void IsolateSetContextExtensions(IsolatePtr iso_ptr,
+                                        const char** names,
+                                        int count);
 extern int ContextRetainedValueCount(ContextPtr ctx);
 extern int ContextInUse(ContextPtr ctx);
 extern void ContextFree(ContextPtr ptr);
@@ -621,6 +647,7 @@ extern RtnValue FunctionCall(ValuePtr ptr,
                              ValuePtr argv[]);
 RtnValue FunctionNewInstance(ValuePtr ptr, int argc, ValuePtr args[]);
 ValuePtr FunctionSourceMapUrl(ValuePtr ptr);
+extern void FunctionSetName(ValuePtr ptr, const char* name, int len);
 
 const char* Version();
 extern void SetFlags(const char* flags);

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "_cgo_export.h"
+#include "v8-extension.h"
 #include "v8-inspector.h"
 
 using namespace v8;
@@ -350,11 +351,16 @@ void IsolateSetMicrotasksPolicy(IsolatePtr iso, int policy) {
                                         : v8::MicrotasksPolicy::kAuto);
 }
 
+struct contextExtensions;
+static std::unordered_map<Isolate*, contextExtensions>& isolateExtensions();
+
 void IsolateDispose(IsolatePtr iso) {
   if (iso == nullptr) {
     return;
   }
   ContextFree(isolateInternalContext(iso));
+  // A later isolate can be allocated at the same address.
+  isolateExtensions().erase(iso);
 
   iso->Dispose();
 }
@@ -2168,6 +2174,72 @@ void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
 // creation, keyed by the outgoing context's own reference number. Not by
 // isolate: a tab and every frame in it share one, and an isolate-wide slot let
 // a frame adopt the page's window.
+// ---- embedder extensions --------------------------------------------------
+
+void RegisterExtensionSource(const char* name,
+                             const char* source,
+                             int source_len,
+                             const char** deps,
+                             int dep_count) {
+  // V8 keeps the extension, and the strings it was built from, for the life
+  // of the process: copied here and never freed on purpose.
+  char* name_copy = strdup(name);
+  char* source_copy = static_cast<char*>(malloc(source_len + 1));
+  memcpy(source_copy, source, source_len);
+  source_copy[source_len] = 0;
+  const char** deps_copy = nullptr;
+  if (dep_count > 0) {
+    deps_copy = static_cast<const char**>(malloc(sizeof(char*) * dep_count));
+    for (int i = 0; i < dep_count; i++) {
+      deps_copy[i] = strdup(deps[i]);
+    }
+  }
+  v8::RegisterExtension(std::make_unique<v8::Extension>(
+      name_copy, source_copy, dep_count, deps_copy, source_len));
+}
+
+// The extensions each isolate's new contexts install. The names are owned
+// here; the pointer vector is what ExtensionConfiguration reads.
+struct contextExtensions {
+  std::vector<std::string> names;
+  std::vector<const char*> ptrs;
+};
+
+static std::unordered_map<Isolate*, contextExtensions>& isolateExtensions() {
+  static auto* m = new std::unordered_map<Isolate*, contextExtensions>();
+  return *m;
+}
+
+void IsolateSetContextExtensions(IsolatePtr iso, const char** names, int count) {
+  auto& all = isolateExtensions();
+  if (count <= 0) {
+    all.erase(iso);
+    return;
+  }
+  contextExtensions& ext = all[iso];
+  ext.names.assign(names, names + count);
+  ext.ptrs.clear();
+  for (auto& n : ext.names) {
+    ext.ptrs.push_back(n.c_str());
+  }
+}
+
+// newContextWithExtensions is Context::New with the isolate's configured
+// extensions, when it has any.
+static Local<Context> newContextWithExtensions(
+    Isolate* iso,
+    Local<ObjectTemplate> global_template,
+    MaybeLocal<Value> global_object) {
+  auto& all = isolateExtensions();
+  auto it = all.find(iso);
+  if (it == all.end() || it->second.ptrs.empty()) {
+    return Context::New(iso, nullptr, global_template, global_object);
+  }
+  ExtensionConfiguration config(static_cast<int>(it->second.ptrs.size()),
+                                it->second.ptrs.data());
+  return Context::New(iso, &config, global_template, global_object);
+}
+
 static std::unordered_map<int, Global<Value>>& keptGlobals() {
   static std::unordered_map<int, Global<Value>> kept;
   return kept;
@@ -2221,7 +2293,7 @@ ContextPtr NewContextAdoptingGlobal(IsolatePtr iso,
   }
 
   Local<Context> local_ctx =
-      Context::New(iso, nullptr, global_template, global_object);
+      newContextWithExtensions(iso, global_template, global_object);
   local_ctx->SetEmbedderData(1, Integer::New(iso, ref));
 
   m_ctx* ctx = new m_ctx;
@@ -2249,7 +2321,8 @@ ContextPtr NewContext(IsolatePtr iso,
   // context as a simple integer identifier; this can then be used on the Go
   // side to lookup the context in the context registry. We use slot 1 as slot 0
   // has special meaning for the Chrome debugger.
-  Local<Context> local_ctx = Context::New(iso, nullptr, global_template);
+  Local<Context> local_ctx =
+      newContextWithExtensions(iso, global_template, MaybeLocal<Value>());
   local_ctx->SetEmbedderData(1, Integer::New(iso, ref));
 
   m_ctx* ctx = new m_ctx;
@@ -3592,6 +3665,15 @@ ValuePtr FunctionSourceMapUrl(ValuePtr ptr) {
   rtnval->ctx = ctx;
   rtnval->ptr = Global<Value>(iso, result);
   return tracked_value(ctx, rtnval);
+}
+
+void FunctionSetName(ValuePtr ptr, const char* name, int len) {
+  LOCAL_VALUE(ptr)
+  Local<Function> fn = Local<Function>::Cast(value);
+  Local<String> str =
+      String::NewFromUtf8(iso, name, NewStringType::kNormal, len)
+          .ToLocalChecked();
+  fn->SetName(str);
 }
 
 /********** v8::V8 **********/

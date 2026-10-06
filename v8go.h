@@ -565,6 +565,10 @@ extern RtnValue NewValueBigIntFromWords(IsolatePtr iso_ptr,
                                         const uint64_t* words);
 void ValueRelease(ValuePtr ptr);
 extern RtnString ValueToString(ValuePtr ptr);
+extern RtnString ValueToWTF8String(ValuePtr ptr);
+extern RtnValue NewValueStringUTF16(IsolatePtr iso_ptr,
+                                    const uint16_t* v,
+                                    int v_length);
 const uint32_t* ValueToArrayIndex(ValuePtr ptr);
 int ValueToBoolean(ValuePtr ptr);
 int32_t ValueToInt32(ValuePtr ptr);

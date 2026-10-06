@@ -3128,6 +3128,46 @@ RtnString ValueToString(ValuePtr ptr) {
   return rtn;
 }
 
+RtnString ValueToWTF8String(ValuePtr ptr) {
+  LOCAL_VALUE(ptr);
+  RtnString rtn = {0};
+  Local<String> str;
+  if (!value->ToString(local_ctx).ToLocal(&str)) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+  // Without kReplaceInvalidUtf8 an unpaired surrogate is written as its own
+  // three-byte sequence (WTF-8), so the string round-trips exactly.
+  size_t length = str->Utf8LengthV2(iso);
+  char* data = static_cast<char*>(malloc(length + 1));
+  size_t written = str->WriteUtf8V2(iso, data, length + 1,
+                                    String::WriteFlags::kNullTerminate);
+  rtn.data = data;
+  rtn.length = written > 0 ? written - 1 : 0;
+  return rtn;
+}
+
+RtnValue NewValueStringUTF16(IsolatePtr iso,
+                             const uint16_t* v,
+                             int v_length) {
+  ISOLATE_SCOPE_INTERNAL_CONTEXT(iso);
+  TryCatch try_catch(iso);
+  RtnValue rtn = {};
+  Local<String> str;
+  if (!String::NewFromTwoByte(iso, v, NewStringType::kNormal, v_length)
+           .ToLocal(&str)) {
+    rtn.error = ExceptionError(try_catch, iso, ctx->ptr.Get(iso));
+    return rtn;
+  }
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, str);
+  rtn.value = tracked_value(ctx, val);
+  return rtn;
+}
+
 uint32_t ValueToUint32(ValuePtr ptr) {
   LOCAL_VALUE(ptr);
   return value->Uint32Value(local_ctx).FromMaybe(0);

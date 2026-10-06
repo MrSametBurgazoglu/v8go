@@ -20,3 +20,5 @@ deps/*_*/v8_monolith.lib
 
 # The previous archive deps/rebuild-libv8.sh keeps.
 deps/*_*/libv8.a.prev
+# The archive hash deps/rebuild-libv8.sh writes for the build cache.
+deps/*_*/libv8_stamp.go

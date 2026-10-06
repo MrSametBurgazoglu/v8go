@@ -95,9 +95,18 @@ CC=clang CXX=clang++ CGO_LDFLAGS=-L$PWD/deps/linux_x86_64 go test -p 1 -run 'Tes
 
 `TestTemporal` (`temporal_test.go`) fails on an archive built without
 Temporal. In Gezgin, the test262 Temporal pages
-(`third_party/test262/test/built-ins/Temporal`) are the end-to-end check. Go
-caches cgo link results by input hash, so a swapped archive is picked up on
-the next build without `-a`.
+(`third_party/test262/test/built-ins/Temporal`) are the end-to-end check: on
+the first rebuild, PlainDate and Duration went from 1 to 1,173 of 1,181 pages.
+
+**Go's build cache does not see the archive.** It keys a cgo link on Go
+sources and flags, never on the bytes of a library found through `-L`, so
+every binary already in the cache keeps linking the old `libv8.a`. That
+includes the engine's, from every worktree. The first install looked broken
+for exactly this reason: the archive had Temporal and the binary did not.
+`rebuild-libv8.sh` therefore writes the archive's SHA-256 into
+`deps/<os>_<arch>/libv8_stamp.go` (ignored by git), in the package `cgo.go`
+blank-imports, and the next build relinks. If you swap an archive by hand,
+run the same `sha256sum` step, or use `go build -a`.
 
 ## Upgrading V8
 

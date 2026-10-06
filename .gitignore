@@ -17,3 +17,6 @@ c.out
 deps/*_*/libv8.a
 deps/*_*/libv8_debug.a
 deps/*_*/v8_monolith.lib
+
+# The previous archive deps/rebuild-libv8.sh keeps.
+deps/*_*/libv8.a.prev

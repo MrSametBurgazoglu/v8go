@@ -14,7 +14,8 @@ Windows consumers must build with clang (`CC=clang.exe CXX=clang++.exe`) because
 - `go test -run TestName` — run a single test. Note that because cgo compiles `v8go.cc` first, each `go test` invocation takes ~30s of C++ compilation even for one test.
 - `go generate` — runs `clang-format -i -style=Chromium v8go.h v8go.cc`. Any changes to the C/C++ sources MUST be formatted with the "Chromium" style (`brew install clang-format` or distro equivalent).
 - `go test -c --tags leakcheck && ./v8go.test` — leak-check tests locally via LLVM's LeakSanitizer. Use clang (`CC=clang-12 CXX=clang++-12 …`) for usable backtraces. See `leakcheck.go` and README "Local leak checking" for the macOS variant.
-- `deps/build.py --debug` — rebuild V8 locally with debug info + DCHECKs enabled. Takes up to 30 min. Only needed when diagnosing a V8/v8go crash; normal development uses the vendored prebuilt `libv8.a`.
+- `deps/build.py --debug` — rebuild V8 locally with debug info + DCHECKs enabled. Only needed when diagnosing a V8/v8go crash.
+- `deps/rebuild-libv8.sh` — rebuild the release `libv8.a` from source, out of tree, under a memory cap, and install it. Temporal is on by default. About 40 minutes on 3 jobs. See `deps/BUILDING-LIBV8.md`.
 
 Minimum Go version: 1.17 (required for SharedArrayBuffer support). CI tests against Go 1.22.x and 1.23.x.
 
@@ -59,7 +60,7 @@ The build.py GN arg choices balance V8's defaults against the ABI reality of the
 
 - `use_custom_libcxx=true`: V8 14.x source (e.g. `src/bigint/bigint.h`) depends on transitive `<memory>` includes that libstdc++ doesn't provide. Using V8's bundled libc++ is necessary. libc++ is statically merged into `libv8.a` via `ar -M` after the monolith is produced, so consumers don't need a system libc++ install at link time.
 - `v8_enable_sandbox=false`: V8 14.x asserts `v8_enable_sandbox => use_safe_libcxx`. We don't use safe libc++, so the sandbox is off. This weakens V8's pointer-compression security guarantees; re-enabling would require switching the cgo pipeline to hardened libc++ too. Tracked as a follow-up.
-- `v8_enable_temporal_support=false`: V8 14.x's JS `Temporal` implementation depends on a Rust crate (`temporal_rs`) that's emitted as `.rlib`, not a linkable static archive. Bundling it would require either rustc-driven linking or `.rlib → .a` conversion. v8go doesn't need Temporal at the Go layer; disabling cuts ~150 build targets and the Rust toolchain dep.
+- `v8_enable_temporal_support=true` (since 2026-10-06; `--no-temporal` turns it off): V8's `Temporal` is Rust (`temporal_rs` and the ICU4X crates), emitted as `.rlib`s that Chromium links at the final link. `build.py`'s `rust_rlibs()` merges those rlibs and the Rust std the build compiled into `libv8.a`, which doubles it to about 280 MB. The upstream release archive is built without Temporal, so `scripts/fetch-libv8.go` silently removes it. See `deps/BUILDING-LIBV8.md`, and rebuild with `deps/rebuild-libv8.sh`.
 - `use_sysroot=false`: Chromium's `debian_bullseye_amd64-sysroot` ships a libstdc++ too old for C++20 `std::bit_cast`, which V8 14.x's `base/macros.h` uses. Host headers work everywhere we build.
 - CREL relocations stripped via `apply_local_patches()` in `deps/build.py`: V8 14.x with `use_lld=true` (required for the Rust-host build) emits `-Wa,--crel,--allow-experimental-crel`. Binutils GNU `ld` (which cgo's g++/clang++ drivers delegate to by default) can't read CREL yet. The patch removes that one cflag line from V8's `build/config/compiler/BUILD.gn` during build and reverts before the next `gclient sync` so the tree stays clean.
 

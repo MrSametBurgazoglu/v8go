@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Rebuild deps/<os>_<arch>/libv8.a from V8 source, out of tree.
+#
+#   deps/rebuild-libv8.sh            # fetch + build + install, Temporal on
+#   deps/rebuild-libv8.sh --no-temporal
+#   WORK=/big/disk/v8build JOBS=6 deps/rebuild-libv8.sh
+#
+# Read deps/BUILDING-LIBV8.md first: it says what this needs (disk, time,
+# memory) and what each step is for. In short:
+#
+#   1. a workspace (default ~/.cache/v8build) gets depot_tools and a shallow
+#      clone of V8 at the tag in deps/v8_version, plus a copy of this repo's
+#      build.py, so the checked-in deps/v8 submodule is never touched;
+#   2. build.py runs there under a systemd memory/CPU cap (gclient sync,
+#      gn gen, ninja v8_monolith + libc++, merged into one libv8.a);
+#   3. the new archive replaces deps/<os>_<arch>/libv8.a, the old one is kept
+#      as libv8.a.prev, and the v8go tests that need V8 run against it.
+#
+# Re-running is incremental: the clone, the gclient sync and the ninja
+# outputs in the workspace are reused.
+set -euo pipefail
+
+DEPS=$(cd "$(dirname "$0")" && pwd)
+WORK=${WORK:-$HOME/.cache/v8build}
+JOBS=${JOBS:-3}          # ninja -j; ~1 GB per job at peak
+MEMORY=${MEMORY:-4G}     # the scope's MemoryMax
+CPU=${CPU:-400%}         # the scope's CPUQuota
+SLICE=${SLICE:-gezgin.slice}
+VERSION=$(cat "$DEPS/v8_version")
+ARCH=$(uname -m)
+OSARCH=$(uname -s | tr '[:upper:]' '[:lower:]')_$ARCH
+BUILD_ARGS=("--arch" "$ARCH" "$@")
+
+mkdir -p "$WORK/deps"
+cd "$WORK/deps"
+
+# depot_tools: gclient is what fetches V8's DEPS (build/, buildtools/, the
+# clang and Rust toolchains, ICU, temporal_rs). DEPOT_TOOLS_UPDATE=0 keeps it
+# from self-updating; build.py then uses V8's own gn and ninja.
+if [ ! -d depot_tools/.git ]; then
+	git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
+fi
+if [ ! -d v8/.git ]; then
+	git clone --depth 1 --branch "$VERSION" https://chromium.googlesource.com/v8/v8.git v8
+elif [ "$(git -C v8 describe --tags --exact-match 2>/dev/null)" != "$VERSION" ]; then
+	echo "rebuild-libv8: $WORK/deps/v8 is not at $VERSION; remove it and run again" >&2
+	exit 1
+fi
+cp "$DEPS/build.py" build.py
+
+export PATH="$WORK/deps/depot_tools:$PATH" DEPOT_TOOLS_UPDATE=0 NINJA_JOBS="$JOBS"
+echo "rebuild-libv8: V8 $VERSION in $WORK/deps, jobs=$JOBS, cap $MEMORY/$CPU, args: ${BUILD_ARGS[*]}"
+systemd-run --user --scope -q --slice="$SLICE" \
+	-p MemoryMax="$MEMORY" -p MemorySwapMax=0 -p CPUQuota="$CPU" -p RuntimeMaxSec=28800 \
+	--unit="rebuild-libv8-$$" -- python3 build.py "${BUILD_ARGS[@]}"
+
+built="$WORK/deps/$OSARCH/libv8.a"
+dest="$DEPS/$OSARCH/libv8.a"
+if [ ! -s "$built" ]; then
+	echo "rebuild-libv8: no archive at $built" >&2
+	exit 1
+fi
+if [ -f "$dest" ] && [ ! -f "$dest.prev" ]; then
+	cp -p "$dest" "$dest.prev"
+fi
+# Copied beside the target and renamed over it: a cgo link reading the old
+# archive while this runs keeps reading the old file, never half of each.
+cp "$built" "$dest.new"
+mv -f "$dest.new" "$dest"
+echo "rebuild-libv8: installed $dest ($(du -h "$dest" | cut -f1)); previous archive kept as $dest.prev"
+
+# The smoke test: v8go links against the new archive and V8 answers.
+cd "$DEPS/.."
+export CC=${CC:-clang} CXX=${CXX:-clang++} CGO_LDFLAGS="-L$DEPS/$OSARCH"
+systemd-run --user --scope -q --slice="$SLICE" -p MemoryMax=4G -p MemorySwapMax=0 -p CPUQuota=200% \
+	-p RuntimeMaxSec=1800 --unit="rebuild-libv8-test-$$" -- \
+	go test -p 1 -count=1 -run 'TestIntl|TestContext|TestTemporal|TestModule' .
+echo "rebuild-libv8: done"

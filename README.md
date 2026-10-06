@@ -292,6 +292,13 @@ This project also aims to keep up-to-date with the latest (stable) release of V8
 
 ## Development
 
+### Build libv8.a from source
+
+The release archive `scripts/fetch-libv8.go` downloads is built without
+Temporal. To build the archive yourself, with Temporal and outside the repo, run
+`deps/rebuild-libv8.sh`. [deps/BUILDING-LIBV8.md](deps/BUILDING-LIBV8.md) covers
+what it needs, what each step does and the pitfalls already hit.
+
 ### Recompile V8 with debug info and debug checks
 
 [Aside from data races, Go should be memory-safe](https://research.swtch.com/gorace) and v8go should preserve this property by adding the necessary checks to return an error or panic on these unsupported code paths. Release builds of v8go don't include debugging information for the V8 library since it significantly adds to the binary size, slows down compilation and shouldn't be needed by users of v8go. However, if a v8go bug causes a crash (e.g. during new feature development) then it can be helpful to build V8 with debugging information to get a C++ backtrace with line numbers. The following steps will not only do that, but also enable V8 debug checking, which can help with catching misuse of the V8 API.

@@ -19,7 +19,15 @@ parser.add_argument('--arch',
     choices=valid_archs,
     default=default_arch,
     required=default_arch is None)
-parser.set_defaults(debug=False, clang=True)
+# Temporal (the ECMAScript date/time API) is on, as in Chromium. V8 builds it
+# from the temporal_rs Rust crate with the Rust toolchain its DEPS downloads,
+# so nothing extra needs installing; --no-temporal builds without it.
+parser.add_argument('--no-temporal', dest='temporal', action='store_false')
+# Parallel compile jobs. Ninja's default (cores + 2) needs well over 4 GB;
+# under a memory cap pass a small number. See BUILDING-LIBV8.md.
+parser.add_argument('--jobs', dest='jobs', type=int,
+    default=int(os.environ.get('NINJA_JOBS', '0')))
+parser.set_defaults(debug=False, clang=True, temporal=True)
 args = parser.parse_args()
 
 deps_path = os.path.dirname(os.path.realpath(__file__))
@@ -69,7 +77,7 @@ icu_use_data_file=false
 v8_enable_test_features=false
 exclude_unwind_tables=true
 v8_enable_sandbox=false
-v8_enable_temporal_support=false
+v8_enable_temporal_support=%s
 """
 
 def v8deps():
@@ -187,9 +195,19 @@ def main():
     # to the cipd-installed binaries; on Linux/macOS it ships posix shell
     # wrappers with no extension. There is no `gn.exe` at the root.
     gn_path = os.path.join(tools_path, "gn.bat" if is_windows else "gn")
-    assert os.path.exists(gn_path), f"gn not found at {gn_path}"
     ninja_path = os.path.join(tools_path,
                               "ninja.bat" if is_windows else "ninja")
+    # depot_tools' gn/ninja wrappers only work once depot_tools has
+    # bootstrapped itself (python3_bin_reldir.txt); with
+    # DEPOT_TOOLS_UPDATE=0 it never does, and `gn gen` fails with "need to
+    # initialize depot_tools". gclient sync has downloaded V8's own gn and
+    # ninja by now, so use those instead.
+    if not is_windows and not os.path.exists(
+            os.path.join(tools_path, "python3_bin_reldir.txt")):
+        gn_path = os.path.join(v8_path, "buildtools", "linux64" if
+                               target_os() == "linux" else "mac", "gn")
+        ninja_path = os.path.join(v8_path, "third_party", "ninja", "ninja")
+    assert os.path.exists(gn_path), f"gn not found at {gn_path}"
     if not os.path.exists(ninja_path) and is_windows:
         # Older depot_tools on Windows had `ninja.exe` directly; newer
         # switched to a bat wrapper. Fall back if needed.
@@ -243,7 +261,8 @@ def main():
     arch = v8_arch()
     gnargs = gn_args % (is_debug, is_clang, arch, arch, target_os(),
                         use_custom_libcxx, use_allocator_shim,
-                        use_sysroot, symbol_level, strip_debug_info)
+                        use_sysroot, symbol_level, strip_debug_info,
+                        'true' if args.temporal else 'false')
     gen_args = gnargs.replace('\n', ' ')
 
     subprocess.check_call(
@@ -264,7 +283,9 @@ def main():
             "obj/buildtools/third_party/libc++abi/libc++abi.a",
         ]
     subprocess.check_call(
-        [ninja_path, "-v", "-C", build_path] + ninja_targets,
+        [ninja_path, "-v", "-C", build_path]
+        + (["-j", str(args.jobs)] if args.jobs > 0 else [])
+        + ninja_targets,
         cwd=v8_path, env=env)
 
     dest_path = os.path.join(deps_path, os_arch())
@@ -428,18 +449,50 @@ def main():
                     f" and update find_target_archive() accordingly.")
             print(f"merging libc++ ({libcxx}) and libc++abi ({libcxxabi}) "
                   "into libv8.a")
+            # V8's Rust code (Temporal, through temporal_rs and the ICU4X
+            # crates) is not in v8_monolith: Chromium's build links Rust
+            # libraries at the final link, as rlibs plus the Rust standard
+            # library it compiled. cgo's final link knows nothing of them,
+            # so without this every Temporal entry point is an undefined
+            # temporal_rs_* symbol. An rlib is an ar archive, so its object
+            # files merge like libc++'s (its lib.rmeta member is not an
+            # object and the linker never loads it).
+            rust_libs = rust_rlibs(build_path)
+            if rust_libs:
+                print(f"merging {len(rust_libs)} Rust rlibs into libv8.a")
             script = (
                 "CREATE {dest}\n"
                 "ADDLIB {monolith}\n"
                 "ADDLIB {libcxx}\n"
                 "ADDLIB {libcxxabi}\n"
+                "{rust}"
                 "SAVE\n"
                 "END\n"
             ).format(dest=dest_fn, monolith=monolith,
-                     libcxx=libcxx, libcxxabi=libcxxabi)
+                     libcxx=libcxx, libcxxabi=libcxxabi,
+                     rust="".join("ADDLIB %s\n" % r for r in rust_libs))
             subprocess.run([llvm_ar, "-M"], input=script, text=True,
                            check=True)
         # llvm-ar writes a symbol index by default; no separate ranlib pass.
+
+
+def rust_rlibs(build_path):
+    """The target's Rust rlibs: every crate under obj/ (the host-toolchain
+    build tools live in other directories) and the standard library the
+    build compiled into local_rustc_sysroot, minus the crates only test
+    harnesses and profiling builds use."""
+    import glob
+    crates = sorted(glob.glob(os.path.join(build_path, "obj", "**", "*.rlib"),
+                              recursive=True))
+    std_dir = os.path.join(build_path, "local_rustc_sysroot", "lib", "rustlib",
+                           "x86_64-unknown-linux-gnu" if args.arch == "x86_64"
+                           else "aarch64-unknown-linux-gnu", "lib")
+    skip = ("libtest_", "libgetopts_", "libprofiler_builtins_", "libproc_macro")
+    std = sorted(p for p in glob.glob(os.path.join(std_dir, "*.rlib"))
+                 if not os.path.basename(p).startswith(skip))
+    if crates and not std:
+        raise RuntimeError(f"Rust crates built but no standard library under {std_dir}")
+    return crates + std
 
 
 if __name__ == "__main__":

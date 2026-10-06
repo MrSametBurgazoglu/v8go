@@ -296,6 +296,11 @@ extern ContextPtr NewContextAdoptingGlobal(IsolatePtr iso_ptr,
                                            int ref,
                                            int adopt_from);
 extern void ContextSetSecurityToken(ContextPtr ctx_ptr, ValuePtr token_ptr);
+// ContextSetImportMetaInitializer installs |fn_ptr| (a function, or null to
+// remove it) to be called as fn(import.meta, url) the first time each module
+// compiled in the context touches import.meta, after `url` is set.
+extern void ContextSetImportMetaInitializer(ContextPtr ctx_ptr,
+                                            ValuePtr fn_ptr);
 extern void ContextAllowCodeGeneration(ContextPtr ctx_ptr,
                                        int allow,
                                        const char* message);

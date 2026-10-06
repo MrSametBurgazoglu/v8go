@@ -8,6 +8,7 @@ package v8go
 // #include "v8go.h"
 import "C"
 import (
+	"runtime"
 	"sync"
 	"unsafe"
 )
@@ -160,4 +161,23 @@ func goResolveDynamicImport(ctxPtr C.ContextPtr, specifier *C.char, referrer *C.
 		*outKey = C.CString(key)
 	}
 	return 1
+}
+
+// SetImportMetaInitializer installs fn to complete each module's import.meta:
+// the first time a module compiled in this context touches import.meta, V8
+// asks the host to fill the object in, and after setting `url` (the module's
+// specifier) v8go calls fn(meta, url). It is how an embedder adds what its
+// platform defines beside url — HTML's import.meta.resolve, a function that
+// resolves a specifier against that module's URL. An exception fn throws is
+// swallowed; the module sees import.meta as far as fn got. nil removes it.
+func (c *Context) SetImportMetaInitializer(fn *Function) {
+	if c == nil || c.ptr == nil {
+		return
+	}
+	var ptr C.ValuePtr
+	if fn != nil && fn.Value != nil {
+		ptr = fn.Value.ptr
+	}
+	C.ContextSetImportMetaInitializer(c.ptr, ptr)
+	runtime.KeepAlive(fn)
 }

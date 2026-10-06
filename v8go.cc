@@ -114,6 +114,11 @@ struct m_ctx {
   // produced, on the isolate's internal context only (ContextTakeException).
   // Weak: an error nobody asks for must not keep its realm alive.
   Global<Value> lastException;
+  // importMetaInit is called with (import.meta, url) the first time a module
+  // in this context touches import.meta, after `url` is set: the embedder's
+  // hook for the rest of the object (HTML's import.meta.resolve).
+  // ContextSetImportMetaInitializer.
+  Global<Function> importMetaInit;
 };
 
 static void contextDelete(m_ctx* ctx);
@@ -954,6 +959,17 @@ static void hostInitializeImportMeta(Local<Context> context,
     return;
   }
   meta->CreateDataProperty(context, url_key, url_val).FromMaybe(false);
+
+  m_ctx* ctx = recoverModuleContext(context);
+  if (ctx == nullptr || ctx->importMetaInit.IsEmpty()) {
+    return;
+  }
+  Local<Function> init = ctx->importMetaInit.Get(iso);
+  Local<Value> args[2] = {meta, url_val};
+  // An initializer that throws leaves import.meta as far as it got; the
+  // module that touched import.meta must not see the embedder's exception.
+  TryCatch try_catch(iso);
+  init->Call(context, Undefined(iso), 2, args).IsEmpty();
 }
 
 // ContextRegisterModule stores ES module source under a specifier string so
@@ -2766,6 +2782,20 @@ void ContextSetSecurityToken(ContextPtr ctx, ValuePtr token_ptr) {
     return;
   }
   local_ctx->SetSecurityToken(token_ptr->ptr.Get(iso));
+}
+
+void ContextSetImportMetaInitializer(ContextPtr ctx, ValuePtr fn_ptr) {
+  LOCAL_CONTEXT(ctx);
+  if (fn_ptr == nullptr) {
+    ctx->importMetaInit.Reset();
+    return;
+  }
+  Local<Value> fn = fn_ptr->ptr.Get(iso);
+  if (!fn->IsFunction()) {
+    ctx->importMetaInit.Reset();
+    return;
+  }
+  ctx->importMetaInit.Reset(iso, fn.As<Function>());
 }
 
 void ContextAllowCodeGeneration(ContextPtr ctx,

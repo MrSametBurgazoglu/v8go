@@ -100,6 +100,15 @@ func (o *ObjectTemplate) MarkAsUndetectable() {
 	runtime.KeepAlive(o)
 }
 
+// SetCodeLike makes instances of this template "code-like": eval and the
+// Function constructor offer such an object to the code-generation check
+// (Isolate.SetCodeGenerationCheck) with isCodeLike true, instead of returning
+// it unevaluated. Trusted Types' TrustedScript is the object it exists for.
+func (o *ObjectTemplate) SetCodeLike() {
+	C.ObjectTemplateSetCodeLike(o.ptr)
+	runtime.KeepAlive(o)
+}
+
 // SetCallAsFunctionHandler makes instances of this template callable, running
 // callback for both `obj(…)` and `new obj(…)`.
 func (o *ObjectTemplate) SetCallAsFunctionHandler(callback FunctionCallback) {

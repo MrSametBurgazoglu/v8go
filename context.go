@@ -371,3 +371,59 @@ func objectResult(ctx *Context, rtn C.RtnValue) (*Object, error) {
 	}
 	return &Object{&Value{rtn.value, ctx}}, nil
 }
+
+// CodeGenerationCheck is asked about one compilation from a string, and
+// about eval of a non-string, in a context that does not allow them outright
+// (Context.AllowCodeGenerationFromStrings(false, ...)): an embedder that
+// decides every one itself refuses in every context and allows here. source is the
+// string, or the code-like object; codeLike says V8 found it code-like (for
+// the Function constructor: every argument was). The answer is whether to
+// compile, and, when modified is true, the text to compile instead — a
+// code-like object's own text, without which eval hands the object back.
+// The callback may run script; source is valid only during the call and must
+// not be released. eval of an object passes codeLike false whatever the
+// object is (V8 computes it for the Function constructor only); the check
+// recognises its own objects with Value.IsCodeLike.
+type CodeGenerationCheck func(ctx *Context, source *Value, codeLike bool) (allowed bool, replacement string, modified bool)
+
+// SetCodeGenerationCheck replaces V8's code-generation callback for this
+// isolate with check. It supersedes SetCodeGenerationRefusedHandler: the
+// isolate has one such callback, and the most recent registration of either
+// is the one V8 calls.
+func (i *Isolate) SetCodeGenerationCheck(check CodeGenerationCheck) {
+	if i.ptr == nil {
+		return
+	}
+	codeGenerationChecks.Store(i.ptr, check)
+	C.IsolateSetCodeGenerationCheckCallback(i.ptr)
+}
+
+var codeGenerationChecks sync.Map
+
+//export goCodeGenerationCheck
+func goCodeGenerationCheck(iso C.IsolatePtr, ctxRef C.int, val C.ValuePtr, codeLike C.int, out **C.char, outLen *C.int) C.int {
+	v, ok := codeGenerationChecks.Load(iso)
+	if !ok {
+		return 0
+	}
+	check, ok := v.(CodeGenerationCheck)
+	if !ok || check == nil {
+		return 0
+	}
+	ctx := getContext(int(ctxRef))
+	var source *Value
+	if ctx != nil {
+		source = &Value{ptr: val, ctx: ctx}
+	} else {
+		source = &Value{ptr: val}
+	}
+	allowed, replacement, modified := check(ctx, source, codeLike != 0)
+	if modified {
+		*out = C.CString(replacement)
+		*outLen = C.int(len(replacement))
+	}
+	if allowed {
+		return 1
+	}
+	return 0
+}

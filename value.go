@@ -549,6 +549,14 @@ func (v *Value) Release() {
 	C.ValueRelease(v.ptr)
 }
 
+// IsCodeLike returns true if this value is an object made from a code-like
+// ObjectTemplate (ObjectTemplate.SetCodeLike). eval offers such an object to
+// the code-generation check like any other non-string; this is how the check
+// knows it for one of its own.
+func (v *Value) IsCodeLike() bool {
+	return C.ValueIsCodeLike(v.ptr) != 0
+}
+
 // IsWasmModuleObject returns true if this value is a `WasmModuleObject`.
 func (v *Value) IsWasmModuleObject() bool {
 	// TODO(rogchap): requires test case

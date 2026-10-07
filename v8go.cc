@@ -523,7 +523,63 @@ ModifyCodeGenerationFromStringsResult codeGenerationTrampoline(
   return ModifyCodeGenerationFromStringsResult();
 }
 
+// codeGenerationCheckTrampoline is ModifyCodeGenerationFromStringsCallback2
+// handing the decision to Go (goCodeGenerationCheck): the source as a
+// transient value and whether V8 found it code-like. Go answers allowed or
+// not, and may name the source to compile instead (out, malloc'd, UTF-8) —
+// which is how a code-like object, which V8 cannot compile itself, becomes
+// the text it stands for.
+ModifyCodeGenerationFromStringsResult codeGenerationCheckTrampoline(
+    Local<Context> context,
+    Local<Value> source,
+    bool is_code_like) {
+  Isolate* iso = Isolate::GetCurrent();
+  int ctx_ref = 0;
+  Local<Value> ref_val = context->GetEmbedderData(1);
+  if (!ref_val.IsEmpty() && ref_val->IsInt32()) {
+    ctx_ref = ref_val.As<Integer>()->Value();
+  }
+  m_ctx* ctx = ctx_ref != 0 ? goContext(ctx_ref) : nullptr;
+  ModifyCodeGenerationFromStringsResult result;
+  if (ctx == nullptr || source.IsEmpty()) {
+    // Not a context v8go made: keep V8's identity answer for a non-string.
+    result.codegen_allowed = source.IsEmpty() || !source->IsString();
+    return result;
+  }
+  m_value* val = new m_value;
+  val->id = 0;
+  val->iso = iso;
+  val->ctx = ctx;
+  val->ptr = Global<Value>(iso, source);
+  char* out = nullptr;
+  int out_len = 0;
+  int allowed = goCodeGenerationCheck(iso, ctx_ref, val, is_code_like ? 1 : 0,
+                                      &out, &out_len);
+  val->ptr.Reset();
+  delete val;
+  result.codegen_allowed = allowed != 0;
+  if (out != nullptr) {
+    if (result.codegen_allowed) {
+      Local<String> text;
+      if (String::NewFromUtf8(iso, out, NewStringType::kNormal, out_len)
+              .ToLocal(&text)) {
+        result.modified_source = text;
+      }
+    }
+    free(out);
+  }
+  return result;
+}
+
 extern "C" {
+
+void IsolateSetCodeGenerationCheckCallback(IsolatePtr iso) {
+  if (iso == nullptr) {
+    return;
+  }
+  ISOLATE_SCOPE(iso)
+  iso->SetModifyCodeGenerationFromStringsCallback(codeGenerationCheckTrampoline);
+}
 
 void IsolateSetCodeGenerationRefusedCallback(IsolatePtr iso) {
   if (iso == nullptr) {
@@ -1413,6 +1469,13 @@ int ObjectTemplateInternalFieldCount(TemplatePtr ptr) {
 }
 
 static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info);
+
+void ObjectTemplateSetCodeLike(TemplatePtr ptr) {
+  LOCAL_TEMPLATE(ptr);
+
+  Local<ObjectTemplate> obj_tmpl = tmpl.As<ObjectTemplate>();
+  obj_tmpl->SetCodeLike();
+}
 
 void ObjectTemplateMarkAsUndetectable(TemplatePtr ptr) {
   LOCAL_TEMPLATE(ptr);
@@ -3480,6 +3543,11 @@ int ValueIsSharedArrayBuffer(ValuePtr ptr) {
 int ValueIsProxy(ValuePtr ptr) {
   LOCAL_VALUE(ptr);
   return value->IsProxy();
+}
+
+int ValueIsCodeLike(ValuePtr ptr) {
+  LOCAL_VALUE(ptr);
+  return value->IsObject() && value.As<Object>()->IsCodeLike(iso);
 }
 
 int ValueIsWasmModuleObject(ValuePtr ptr) {

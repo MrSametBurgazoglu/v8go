@@ -193,6 +193,10 @@ extern void IsolateSetPromiseRejectCallback(IsolatePtr iso);
 // IsolateSetCodeGenerationRefusedCallback makes V8 tell Go (goCodeGenerationRefused)
 // each time a context that refuses string compilation refuses one.
 extern void IsolateSetCodeGenerationRefusedCallback(IsolatePtr iso);
+// IsolateSetCodeGenerationCheckCallback makes V8 ask Go
+// (goCodeGenerationCheck) about every string compilation in a context that
+// does not allow them outright, and about eval of a code-like object.
+extern void IsolateSetCodeGenerationCheckCallback(IsolatePtr iso);
 // IsolateWarmupOldGenerationHeap forces V8 to commit at least target_bytes
 // of old-generation pages by allocating a non-deduplicated retained buffer
 // inside an internal context, then collecting it. With --no-memory-reducer
@@ -339,6 +343,7 @@ extern void ObjectTemplateSetInternalFieldCount(TemplatePtr ptr,
                                                 int field_count);
 extern int ObjectTemplateInternalFieldCount(TemplatePtr ptr);
 extern void ObjectTemplateMarkAsUndetectable(TemplatePtr ptr);
+extern void ObjectTemplateSetCodeLike(TemplatePtr ptr);
 extern void ObjectTemplateSetCallAsFunctionHandler(TemplatePtr ptr,
                                                    int callback_ref);
 
@@ -632,6 +637,7 @@ int ValueIsBigUint64Array(ValuePtr ptr);
 int ValueIsDataView(ValuePtr ptr);
 int ValueIsSharedArrayBuffer(ValuePtr ptr);
 int ValueIsProxy(ValuePtr ptr);
+int ValueIsCodeLike(ValuePtr ptr);
 int ValueIsWasmModuleObject(ValuePtr ptr);
 int ValueIsModuleNamespaceObject(ValuePtr ptr);
 

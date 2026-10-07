@@ -990,6 +990,49 @@ static MaybeLocal<Promise> hostImportModuleDynamically(
   return deferDynamicImport(context, resolver, specifier);
 }
 
+// importMetaResolve is import.meta.resolve(specifier): the specifier
+// converted to a string, resolved by the embedder against the module's URL
+// (the function's data), and either the resolved URL or a TypeError.
+static void importMetaResolve(const FunctionCallbackInfo<Value>& info) {
+  Isolate* iso = info.GetIsolate();
+  HandleScope handle_scope(iso);
+  Local<Context> context = iso->GetCurrentContext();
+  Local<Value> arg =
+      info.Length() > 0 ? info[0] : Undefined(iso).As<Value>();
+  Local<String> specifier;
+  if (!arg->ToString(context).ToLocal(&specifier)) {
+    return;  // the conversion threw; the exception propagates
+  }
+  m_ctx* ctx = recoverModuleContext(context);
+  if (ctx == nullptr) {
+    return;
+  }
+  ContextUse ctx_use(ctx);
+  String::Utf8Value spec_utf8(iso, specifier);
+  String::Utf8Value url_utf8(iso, info.Data());
+  char* out = nullptr;
+  char* err = nullptr;
+  int result = goResolveImportMeta(
+      ctx, const_cast<char*>(*spec_utf8 ? *spec_utf8 : ""),
+      const_cast<char*>(*url_utf8 ? *url_utf8 : ""), &out, &err);
+  if (result == 1) {
+    Local<String> resolved;
+    bool made = String::NewFromUtf8(iso, out ? out : "", NewStringType::kNormal)
+                    .ToLocal(&resolved);
+    free(out);
+    if (made) {
+      info.GetReturnValue().Set(resolved);
+    }
+    return;
+  }
+  Local<String> msg =
+      String::NewFromUtf8(iso, err ? err : "Failed to resolve module specifier",
+                          NewStringType::kNormal)
+          .ToLocalChecked();
+  free(err);
+  iso->ThrowException(Exception::TypeError(msg));
+}
+
 // hostInitializeImportMeta is fired the first time a module touches
 // import.meta. We populate `url` from the resource_name the module was
 // compiled with (the specifier), matching how browsers set it to the
@@ -1017,7 +1060,26 @@ static void hostInitializeImportMeta(Local<Context> context,
   meta->CreateDataProperty(context, url_key, url_val).FromMaybe(false);
 
   m_ctx* ctx = recoverModuleContext(context);
-  if (ctx == nullptr || ctx->importMetaInit.IsEmpty()) {
+  if (ctx == nullptr) {
+    return;
+  }
+  // import.meta.resolve, when the embedder answers it
+  // (Context::SetImportMetaResolver): a function bound to this module's URL.
+  if (goHasImportMetaResolver(ctx)) {
+    Local<Function> resolve;
+    Local<String> resolve_key;
+    if (Function::New(context, importMetaResolve, url_val, 1,
+                      ConstructorBehavior::kThrow)
+            .ToLocal(&resolve) &&
+        String::NewFromUtf8(iso, "resolve", NewStringType::kNormal)
+            .ToLocal(&resolve_key)) {
+      resolve->SetName(resolve_key);
+      meta->CreateDataProperty(context, resolve_key, resolve).FromMaybe(false);
+    }
+  }
+  // Then the embedder's own initializer (Context::SetImportMetaInitializer),
+  // which may add to or replace what is there.
+  if (ctx->importMetaInit.IsEmpty()) {
     return;
   }
   Local<Function> init = ctx->importMetaInit.Get(iso);

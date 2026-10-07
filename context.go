@@ -305,6 +305,7 @@ func (c *Context) Close() {
 	// context can be given the same address.
 	moduleResolvers.Delete(c.ptr)
 	dynamicImportResolvers.Delete(c.ptr)
+	importMetaResolvers.Delete(c.ptr)
 	C.ContextFree(c.ptr)
 	c.ptr = nil
 }

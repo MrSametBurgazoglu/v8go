@@ -161,3 +161,56 @@ func goResolveDynamicImport(ctxPtr C.ContextPtr, specifier *C.char, referrer *C.
 	}
 	return 1
 }
+
+// importMetaResolvers holds the import.meta.resolve answer for each context.
+var importMetaResolvers sync.Map // C.ContextPtr -> func(specifier, moduleURL string) (string, error)
+
+// SetImportMetaResolver gives every module in the context an
+// import.meta.resolve(specifier), answered by resolve: the specifier (already
+// converted to a string) and the URL the module was registered under, and
+// either the resolved URL or an error, which the call throws as a TypeError.
+//
+// Without a resolver import.meta has only url, as before. The resolver is
+// consulted when a module first touches import.meta, so it must be set
+// before then for the module to have resolve at all.
+//
+// It is called synchronously, on the thread running the module's JS.
+func (c *Context) SetImportMetaResolver(resolve func(specifier, moduleURL string) (string, error)) {
+	if c == nil || c.ptr == nil {
+		return
+	}
+	if resolve == nil {
+		importMetaResolvers.Delete(c.ptr)
+		return
+	}
+	importMetaResolvers.Store(c.ptr, resolve)
+}
+
+//export goHasImportMetaResolver
+func goHasImportMetaResolver(ctxPtr C.ContextPtr) C.int {
+	if _, ok := importMetaResolvers.Load(ctxPtr); ok {
+		return 1
+	}
+	return 0
+}
+
+//export goResolveImportMeta
+func goResolveImportMeta(ctxPtr C.ContextPtr, specifier *C.char, moduleURL *C.char, out **C.char, errOut **C.char) C.int {
+	entry, ok := importMetaResolvers.Load(ctxPtr)
+	if !ok {
+		*errOut = C.CString("import.meta.resolve is not available")
+		return 2
+	}
+	resolve, ok := entry.(func(string, string) (string, error))
+	if !ok {
+		*errOut = C.CString("import.meta.resolve is not available")
+		return 2
+	}
+	resolved, err := resolve(C.GoString(specifier), C.GoString(moduleURL))
+	if err != nil {
+		*errOut = C.CString(err.Error())
+		return 2
+	}
+	*out = C.CString(resolved)
+	return 1
+}

@@ -2504,6 +2504,171 @@ void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
   obj_tmpl->SetHandler(config);
 }
 
+// ---- cross-origin access through a global proxy ----------------------------
+//
+// A WindowProxy is one object for the whole life of its browsing context, and
+// a reference taken while the window was same-origin keeps being handed
+// around after it navigates somewhere that is not: `const w = open();
+// w.location = crossOrigin; ...; w.close()`. V8 refuses every property of a
+// global proxy whose context carries another security token, so such a
+// reference became an object nothing could be done with — not even the
+// postMessage, close and location HTML lets through. The access check below
+// answers "no" (two contexts with one token never reach it: V8 compares the
+// tokens first), and the handler is what V8 consults for a refused access:
+// it asks the ACCESSING context's hook, a function the embedder stored with
+// ContextSetCrossOriginHook, which knows the allowlist. A context with no hook
+// refuses as before.
+//
+// The hook is called as hook(receiver, key, op, value) with op one of the
+// constants below; it may throw, and the exception is the access's.
+static const int kCrossOriginHookSlot = 2;
+enum CrossOriginOp { kXOGet = 0, kXOSet = 1, kXOHas = 2, kXODelete = 3, kXOKeys = 4 };
+
+namespace {
+
+bool denyCrossOriginAccess(Local<Context>, Local<Object>, Local<Value>) {
+  return false;
+}
+
+// crossOriginCall runs the accessing context's hook. It answers false when
+// there is no hook, and otherwise true with *result empty when the hook threw.
+bool crossOriginCall(Isolate* iso,
+                     Local<Object> receiver,
+                     Local<Value> key,
+                     int op,
+                     Local<Value> value,
+                     Local<Value>* result) {
+  Local<Context> ctx = iso->GetCurrentContext();
+  if (ctx.IsEmpty() ||
+      ctx->GetNumberOfEmbedderDataFields() <= uint32_t(kCrossOriginHookSlot)) {
+    return false;
+  }
+  Local<Value> hook = ctx->GetEmbedderData(kCrossOriginHookSlot);
+  if (hook.IsEmpty() || !hook->IsFunction()) {
+    return false;
+  }
+  Local<Value> argv[4] = {receiver, key, Integer::New(iso, op),
+                          value.IsEmpty() ? Local<Value>(Undefined(iso)) : value};
+  MaybeLocal<Value> out =
+      hook.As<Function>()->Call(ctx, Undefined(iso), 4, argv);
+  *result = out.IsEmpty() ? Local<Value>() : out.ToLocalChecked();
+  return true;
+}
+
+Intercepted xoGet(Isolate* iso, Local<Object> self, Local<Value> key,
+                  const PropertyCallbackInfo<Value>& info) {
+  Local<Value> r;
+  if (!crossOriginCall(iso, self, key, kXOGet, Local<Value>(), &r)) {
+    return Intercepted::kNo;
+  }
+  if (!r.IsEmpty()) {
+    info.GetReturnValue().Set(r);
+  }
+  return Intercepted::kYes;
+}
+
+Intercepted xoSet(Isolate* iso, Local<Object> self, Local<Value> key,
+                  Local<Value> value) {
+  Local<Value> r;
+  if (!crossOriginCall(iso, self, key, kXOSet, value, &r)) {
+    return Intercepted::kNo;
+  }
+  return Intercepted::kYes;
+}
+
+Intercepted xoHas(Isolate* iso, Local<Object> self, Local<Value> key,
+                  const PropertyCallbackInfo<Integer>& info) {
+  Local<Value> r;
+  if (!crossOriginCall(iso, self, key, kXOHas, Local<Value>(), &r)) {
+    return Intercepted::kNo;
+  }
+  if (r.IsEmpty()) {
+    return Intercepted::kYes;  // threw
+  }
+  if (!r->BooleanValue(iso)) {
+    return Intercepted::kNo;
+  }
+  info.GetReturnValue().Set(Integer::New(iso, PropertyAttribute::DontEnum));
+  return Intercepted::kYes;
+}
+
+Intercepted xoDelete(Isolate* iso, Local<Object> self, Local<Value> key,
+                     const PropertyCallbackInfo<Boolean>& info) {
+  Local<Value> r;
+  if (!crossOriginCall(iso, self, key, kXODelete, Local<Value>(), &r)) {
+    return Intercepted::kNo;
+  }
+  if (!r.IsEmpty()) {
+    info.GetReturnValue().Set(r->BooleanValue(iso));
+  }
+  return Intercepted::kYes;
+}
+
+void xoKeys(const PropertyCallbackInfo<Array>& info) {
+  Isolate* iso = info.GetIsolate();
+  Local<Value> r;
+  if (!crossOriginCall(iso, info.Holder(), Undefined(iso), kXOKeys,
+                       Local<Value>(), &r) ||
+      r.IsEmpty() || !r->IsArray()) {
+    return;
+  }
+  info.GetReturnValue().Set(r.As<Array>());
+}
+
+Intercepted xoNamedGetter(Local<Name> name,
+                          const PropertyCallbackInfo<Value>& info) {
+  return xoGet(info.GetIsolate(), info.Holder(), name, info);
+}
+Intercepted xoNamedSetter(Local<Name> name,
+                          Local<Value> value,
+                          const PropertyCallbackInfo<void>& info) {
+  return xoSet(info.GetIsolate(), info.Holder(), name, value);
+}
+Intercepted xoNamedQuery(Local<Name> name,
+                         const PropertyCallbackInfo<Integer>& info) {
+  return xoHas(info.GetIsolate(), info.Holder(), name, info);
+}
+Intercepted xoNamedDeleter(Local<Name> name,
+                           const PropertyCallbackInfo<Boolean>& info) {
+  return xoDelete(info.GetIsolate(), info.Holder(), name, info);
+}
+Intercepted xoIndexedGetter(uint32_t index,
+                            const PropertyCallbackInfo<Value>& info) {
+  Isolate* iso = info.GetIsolate();
+  return xoGet(iso, info.Holder(), Integer::NewFromUnsigned(iso, index), info);
+}
+Intercepted xoIndexedSetter(uint32_t index,
+                            Local<Value> value,
+                            const PropertyCallbackInfo<void>& info) {
+  Isolate* iso = info.GetIsolate();
+  return xoSet(iso, info.Holder(), Integer::NewFromUnsigned(iso, index), value);
+}
+Intercepted xoIndexedQuery(uint32_t index,
+                           const PropertyCallbackInfo<Integer>& info) {
+  Isolate* iso = info.GetIsolate();
+  return xoHas(iso, info.Holder(), Integer::NewFromUnsigned(iso, index), info);
+}
+Intercepted xoIndexedDeleter(uint32_t index,
+                             const PropertyCallbackInfo<Boolean>& info) {
+  Isolate* iso = info.GetIsolate();
+  return xoDelete(iso, info.Holder(), Integer::NewFromUnsigned(iso, index), info);
+}
+
+}  // namespace
+
+void ObjectTemplateSetCrossOriginHandler(TemplatePtr ptr) {
+  LOCAL_TEMPLATE(ptr);
+  Local<ObjectTemplate> obj_tmpl = tmpl.As<ObjectTemplate>();
+  NamedPropertyHandlerConfiguration named(xoNamedGetter, xoNamedSetter,
+                                          xoNamedQuery, xoNamedDeleter, xoKeys);
+  // The own keys are answered once, by the named handler.
+  IndexedPropertyHandlerConfiguration indexed(
+      xoIndexedGetter, xoIndexedSetter, xoIndexedQuery, xoIndexedDeleter,
+      nullptr);
+  obj_tmpl->SetAccessCheckCallbackAndHandler(denyCrossOriginAccess, named,
+                                             indexed);
+}
+
 /********** Context **********/
 
 #define LOCAL_CONTEXT(ctx)                      \
@@ -2907,6 +3072,18 @@ void ContextSetSecurityToken(ContextPtr ctx, ValuePtr token_ptr) {
     return;
   }
   local_ctx->SetSecurityToken(token_ptr->ptr.Get(iso));
+}
+
+// ContextSetCrossOriginHook stores the function a refused access to another
+// context's global proxy is answered by, when this context is the one
+// accessing it. See ObjectTemplateSetCrossOriginHandler.
+void ContextSetCrossOriginHook(ContextPtr ctx, ValuePtr fn_ptr) {
+  LOCAL_CONTEXT(ctx);
+  if (fn_ptr == nullptr) {
+    local_ctx->SetEmbedderData(kCrossOriginHookSlot, Undefined(iso));
+    return;
+  }
+  local_ctx->SetEmbedderData(kCrossOriginHookSlot, fn_ptr->ptr.Get(iso));
 }
 
 void ContextSetImportMetaInitializer(ContextPtr ctx, ValuePtr fn_ptr) {

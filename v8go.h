@@ -546,6 +546,13 @@ extern void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
                                                     int enumerator_ref,
                                                     int flags);
 
+// ObjectTemplateSetCrossOriginHandler makes a global template's proxy answer
+// a cross-origin access through the accessing context's cross-origin hook
+// (ContextSetCrossOriginHook) instead of refusing it. See
+// ObjectTemplate.SetCrossOriginHandler.
+extern void ObjectTemplateSetCrossOriginHandler(TemplatePtr ptr);
+extern void ContextSetCrossOriginHook(ContextPtr ctx_ptr, ValuePtr fn_ptr);
+
 extern ValuePtr NewValueNull(IsolatePtr iso_ptr);
 extern ValuePtr NewValueUndefined(IsolatePtr iso_ptr);
 extern ValuePtr NewValueInteger(IsolatePtr iso_ptr, int32_t v);

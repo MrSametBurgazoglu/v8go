@@ -100,6 +100,18 @@ func (o *ObjectTemplate) MarkAsUndetectable() {
 	runtime.KeepAlive(o)
 }
 
+// SetCrossOriginHandler makes the global proxy of a context built from this
+// global template answer an access from a context with another security token
+// through the accessing context's hook (Context.SetCrossOriginHook) instead of
+// refusing it outright — HTML's WindowProxy, whose cross-origin [[Get]],
+// [[Set]] and [[HasProperty]] let a short allowlist through. Two contexts
+// sharing a token never reach the hook, and a context with no hook refuses as
+// V8 does by default.
+func (o *ObjectTemplate) SetCrossOriginHandler() {
+	C.ObjectTemplateSetCrossOriginHandler(o.ptr)
+	runtime.KeepAlive(o)
+}
+
 // SetCodeLike makes instances of this template "code-like": eval and the
 // Function constructor offer such an object to the code-generation check
 // (Isolate.SetCodeGenerationCheck) with isCodeLike true, instead of returning

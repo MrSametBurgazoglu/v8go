@@ -248,6 +248,21 @@ func (c *Context) SetSecurityToken(token *Value) {
 	runtime.KeepAlive(token)
 }
 
+// SetCrossOriginHook stores fn as the function that answers this context's
+// accesses to another context's global proxy that V8 would refuse — one whose
+// template called SetCrossOriginHandler and whose context carries another
+// security token. It is called as fn(receiver, key, op, value), op 0 get, 1
+// set, 2 has, 3 delete, 4 own keys (key undefined); what it returns is the
+// answer, and what it throws is thrown. nil removes it.
+func (c *Context) SetCrossOriginHook(fn *Value) {
+	var ptr C.ValuePtr
+	if fn != nil {
+		ptr = fn.ptr
+	}
+	C.ContextSetCrossOriginHook(c.ptr, ptr)
+	runtime.KeepAlive(fn)
+}
+
 // AllowCodeGenerationFromStrings says whether script in this context may
 // turn a string into code: eval, new Function, the string forms of
 // setTimeout/setInterval that an embedder builds on them. Refused, each throws

@@ -682,6 +682,10 @@ extern RtnValue FunctionCall(ValuePtr ptr,
                              ValuePtr recv,
                              int argc,
                              ValuePtr argv[]);
+extern RtnValue FunctionCallInCreationContext(ValuePtr ptr,
+                                              ValuePtr recv,
+                                              int argc,
+                                              ValuePtr argv[]);
 RtnValue FunctionNewInstance(ValuePtr ptr, int argc, ValuePtr args[]);
 ValuePtr FunctionSourceMapUrl(ValuePtr ptr);
 extern void FunctionSetName(ValuePtr ptr, const char* name, int len);

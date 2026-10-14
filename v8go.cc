@@ -4397,6 +4397,53 @@ RtnValue FunctionCall(ValuePtr ptr, ValuePtr recv, int argc, ValuePtr args[]) {
   return rtn;
 }
 
+// FunctionCallInCreationContext is FunctionCall with the function's own
+// context entered for the call: V8's entered context is then the callback's
+// realm, which is HTML's entry realm for a callback ("prepare to run a
+// callback"), where FunctionCall leaves it the realm of whoever holds the
+// handle. A microtask the call runs still reports its own.
+RtnValue FunctionCallInCreationContext(ValuePtr ptr,
+                                       ValuePtr recv,
+                                       int argc,
+                                       ValuePtr args[]) {
+  LOCAL_VALUE(ptr)
+
+  RtnValue rtn = {};
+  Local<Function> fn = Local<Function>::Cast(value);
+  Local<Value> argv[argc];
+  buildCallArguments(iso, argv, argc, args);
+
+  Local<Value> local_recv = recv->ptr.Get(iso);
+
+  Local<Context> creation;
+  m_ctx* creation_ctx = nullptr;
+  if (fn->GetCreationContext(iso).ToLocal(&creation) &&
+      creation->GetNumberOfEmbedderDataFields() > 1) {
+    Local<Value> ref_val = creation->GetEmbedderData(1);
+    if (!ref_val.IsEmpty() && ref_val->IsInt32()) {
+      creation_ctx = goContext(ref_val.As<Integer>()->Value());
+    }
+  }
+  if (creation_ctx == nullptr) {
+    creation = local_ctx;
+  }
+  ContextUse creation_use(creation_ctx);
+  Context::Scope creation_scope(creation);
+
+  Local<Value> result;
+  if (!fn->Call(creation, local_recv, argc, argv).ToLocal(&result)) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+  m_value* rtnval = new m_value;
+  rtnval->id = 0;
+  rtnval->iso = iso;
+  rtnval->ctx = ctx;
+  rtnval->ptr = Global<Value>(iso, result);
+  rtn.value = tracked_value(ctx, rtnval);
+  return rtn;
+}
+
 RtnValue FunctionNewInstance(ValuePtr ptr, int argc, ValuePtr args[]) {
   LOCAL_VALUE(ptr)
   RtnValue rtn = {};

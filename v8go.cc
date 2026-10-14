@@ -571,7 +571,26 @@ ModifyCodeGenerationFromStringsResult codeGenerationCheckTrampoline(
   return result;
 }
 
+// wasmCodeGenerationTrampoline is AllowWasmCodeGenerationCallback handing
+// the decision to Go (goWasmCodeGenerationCheck) with the context's ref.
+bool wasmCodeGenerationTrampoline(Local<Context> context, Local<String> source) {
+  int ctx_ref = 0;
+  Local<Value> ref_val = context->GetEmbedderData(1);
+  if (!ref_val.IsEmpty() && ref_val->IsInt32()) {
+    ctx_ref = ref_val.As<Integer>()->Value();
+  }
+  return goWasmCodeGenerationCheck(Isolate::GetCurrent(), ctx_ref) != 0;
+}
+
 extern "C" {
+
+void IsolateSetWasmCodeGenerationCheckCallback(IsolatePtr iso) {
+  if (iso == nullptr) {
+    return;
+  }
+  ISOLATE_SCOPE(iso)
+  iso->SetAllowWasmCodeGenerationCallback(wasmCodeGenerationTrampoline);
+}
 
 void IsolateSetCodeGenerationCheckCallback(IsolatePtr iso) {
   if (iso == nullptr) {

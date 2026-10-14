@@ -197,6 +197,9 @@ extern void IsolateSetCodeGenerationRefusedCallback(IsolatePtr iso);
 // (goCodeGenerationCheck) about every string compilation in a context that
 // does not allow them outright, and about eval of a code-like object.
 extern void IsolateSetCodeGenerationCheckCallback(IsolatePtr iso);
+// IsolateSetWasmCodeGenerationCheckCallback makes V8 ask Go
+// (goWasmCodeGenerationCheck) before compiling any WebAssembly module.
+extern void IsolateSetWasmCodeGenerationCheckCallback(IsolatePtr iso);
 // IsolateWarmupOldGenerationHeap forces V8 to commit at least target_bytes
 // of old-generation pages by allocating a non-deduplicated retained buffer
 // inside an internal context, then collecting it. With --no-memory-reducer

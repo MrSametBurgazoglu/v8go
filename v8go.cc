@@ -3697,6 +3697,28 @@ int ValueIsFunction(ValuePtr ptr) {
   return value->IsFunction();
 }
 
+// The ref of the context an object was created in -- a function's realm --
+// or 0 for a primitive, an object with no creation context, or a context
+// v8go did not make.
+int ValueCreationContextRef(ValuePtr ptr) {
+  LOCAL_VALUE(ptr);
+  if (!value->IsObject()) {
+    return 0;
+  }
+  Local<Context> creation;
+  if (!value.As<Object>()->GetCreationContext(iso).ToLocal(&creation)) {
+    return 0;
+  }
+  if (creation->GetNumberOfEmbedderDataFields() <= 1) {
+    return 0;
+  }
+  Local<Value> ref_val = creation->GetEmbedderData(1);
+  if (ref_val.IsEmpty() || !ref_val->IsInt32()) {
+    return 0;
+  }
+  return ref_val.As<Integer>()->Value();
+}
+
 int ValueIsObject(ValuePtr ptr) {
   LOCAL_VALUE(ptr);
   return value->IsObject();

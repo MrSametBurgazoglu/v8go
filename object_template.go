@@ -107,6 +107,16 @@ func (o *ObjectTemplate) MarkAsUndetectable() {
 // [[Set]] and [[HasProperty]] let a short allowlist through. Two contexts
 // sharing a token never reach the hook, and a context with no hook refuses as
 // V8 does by default.
+//
+// [[GetOwnProperty]], [[OwnPropertyKeys]] (symbols included) and the
+// operations V8 has no interceptor for ([[Delete]], [[DefineOwnProperty]],
+// [[SetPrototypeOf]], [[PreventExtensions]]) reach the hook too; see the op
+// constants in v8go.cc.
+//
+// On an ordinary (non-global) template the access check refuses every
+// context, the instance's own included, so every access to an instance goes
+// through the accessing context's hook: an object that is cross-origin to
+// whoever holds it, as HTML's cross-origin Location and Window are.
 func (o *ObjectTemplate) SetCrossOriginHandler() {
 	C.ObjectTemplateSetCrossOriginHandler(o.ptr)
 	runtime.KeepAlive(o)

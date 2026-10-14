@@ -127,10 +127,20 @@ static void contextDelete(m_ctx* ctx);
 // deletes the m_ctx and every m_value tracked in it, so an embedder that frees
 // a context while one of these is live has pulled the struct out from under a
 // caller that will still write through it; ContextInUse is how it asks first.
+namespace {
+void xoFailedAccessCheck(Local<Object> target, AccessType type, Local<Value>);
+}  // namespace
+
 struct ContextUse {
   explicit ContextUse(m_ctx* ctx) : ctx_(ctx) {
     if (ctx_ != nullptr) {
       ctx_->use_depth++;
+      // The failed-access-check callback lives in V8's per-thread state,
+      // which a Locker on another thread starts without: set where every
+      // entry into a context passes, so the thread that runs the script has
+      // it. See xoFailedAccessCheck; with no hook it throws V8's own
+      // TypeError, so an isolate that never asked for one sees no change.
+      ctx_->iso->SetFailedAccessCheckCallbackFunction(xoFailedAccessCheck);
     }
   }
   ~ContextUse() {
@@ -2521,8 +2531,30 @@ void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
 //
 // The hook is called as hook(receiver, key, op, value) with op one of the
 // constants below; it may throw, and the exception is the access's.
+//
+//   kXOGet        [[Get]]: the value.
+//   kXOSet        [[Set]] of value.
+//   kXOHas        [[HasProperty]]: false or undefined when absent, true for a
+//                 non-enumerable property, or the PropertyAttribute bits.
+//   kXODelete     [[Delete]].
+//   kXOKeys       [[OwnPropertyKeys]]: an array of names and symbols.
+//   kXODescriptor [[GetOwnProperty]]: a descriptor object, or undefined.
+//   kXODefine     [[DefineOwnProperty]] of the descriptor object value.
+//   kXORefused    an operation V8 has no interceptor for ([[SetPrototypeOf]],
+//                 [[PreventExtensions]], a definition): value is the
+//                 v8::AccessType. The hook throws; if it does not, the
+//                 operation throws V8's own TypeError.
 static const int kCrossOriginHookSlot = 2;
-enum CrossOriginOp { kXOGet = 0, kXOSet = 1, kXOHas = 2, kXODelete = 3, kXOKeys = 4 };
+enum CrossOriginOp {
+  kXOGet = 0,
+  kXOSet = 1,
+  kXOHas = 2,
+  kXODelete = 3,
+  kXOKeys = 4,
+  kXODescriptor = 5,
+  kXODefine = 6,
+  kXORefused = 7,
+};
 
 namespace {
 
@@ -2585,11 +2617,78 @@ Intercepted xoHas(Isolate* iso, Local<Object> self, Local<Value> key,
   if (r.IsEmpty()) {
     return Intercepted::kYes;  // threw
   }
+  if (r->IsNumber()) {
+    info.GetReturnValue().Set(
+        Integer::New(iso, int32_t(r.As<Number>()->Value())));
+    return Intercepted::kYes;
+  }
   if (!r->BooleanValue(iso)) {
     return Intercepted::kNo;
   }
   info.GetReturnValue().Set(Integer::New(iso, PropertyAttribute::DontEnum));
   return Intercepted::kYes;
+}
+
+Intercepted xoDescriptor(Isolate* iso, Local<Object> self, Local<Value> key,
+                         const PropertyCallbackInfo<Value>& info) {
+  Local<Value> r;
+  if (!crossOriginCall(iso, self, key, kXODescriptor, Local<Value>(), &r)) {
+    return Intercepted::kNo;
+  }
+  if (r.IsEmpty()) {
+    return Intercepted::kYes;  // threw
+  }
+  if (!r->IsObject()) {
+    return Intercepted::kNo;
+  }
+  info.GetReturnValue().Set(r);
+  return Intercepted::kYes;
+}
+
+// descriptorObject is desc as the object Object.defineProperty takes.
+static Local<Value> descriptorObject(Isolate* iso, const PropertyDescriptor& desc) {
+  Local<Context> ctx = iso->GetCurrentContext();
+  Local<Object> obj = Object::New(iso);
+  auto set = [&](const char* name, Local<Value> v) {
+    obj->Set(ctx, String::NewFromUtf8(iso, name).ToLocalChecked(), v).Check();
+  };
+  if (desc.has_value()) set("value", desc.value());
+  if (desc.has_get()) set("get", desc.get());
+  if (desc.has_set()) set("set", desc.set());
+  if (desc.has_writable()) set("writable", Boolean::New(iso, desc.writable()));
+  if (desc.has_enumerable())
+    set("enumerable", Boolean::New(iso, desc.enumerable()));
+  if (desc.has_configurable())
+    set("configurable", Boolean::New(iso, desc.configurable()));
+  return obj;
+}
+
+Intercepted xoDefine(Isolate* iso, Local<Object> self, Local<Value> key,
+                     const PropertyDescriptor& desc) {
+  Local<Value> r;
+  if (!crossOriginCall(iso, self, key, kXODefine, descriptorObject(iso, desc),
+                       &r)) {
+    return Intercepted::kNo;
+  }
+  return Intercepted::kYes;
+}
+
+// xoFailedAccessCheck is V8's failed-access-check callback for the isolate:
+// the operations a refused access has no interceptor for land here, and the
+// accessing context's hook decides what they throw. Whatever happens, they
+// throw: V8 treats a callback that returns quietly as having allowed nothing
+// and carries on as if the property were absent.
+void xoFailedAccessCheck(Local<Object> target, AccessType type,
+                         Local<Value>) {
+  Isolate* iso = Isolate::GetCurrent();
+  Local<Value> r;
+  if (crossOriginCall(iso, target, Undefined(iso), kXORefused,
+                      Integer::New(iso, int(type)), &r) &&
+      r.IsEmpty()) {
+    return;  // the hook threw
+  }
+  iso->ThrowException(Exception::TypeError(
+      String::NewFromUtf8Literal(iso, "no access")));
 }
 
 Intercepted xoDelete(Isolate* iso, Local<Object> self, Local<Value> key,
@@ -2648,6 +2747,28 @@ Intercepted xoIndexedQuery(uint32_t index,
   Isolate* iso = info.GetIsolate();
   return xoHas(iso, info.Holder(), Integer::NewFromUnsigned(iso, index), info);
 }
+Intercepted xoNamedDescriptor(Local<Name> name,
+                              const PropertyCallbackInfo<Value>& info) {
+  return xoDescriptor(info.GetIsolate(), info.Holder(), name, info);
+}
+Intercepted xoNamedDefiner(Local<Name> name,
+                           const PropertyDescriptor& desc,
+                           const PropertyCallbackInfo<void>& info) {
+  return xoDefine(info.GetIsolate(), info.Holder(), name, desc);
+}
+Intercepted xoIndexedDescriptor(uint32_t index,
+                                const PropertyCallbackInfo<Value>& info) {
+  Isolate* iso = info.GetIsolate();
+  return xoDescriptor(iso, info.Holder(), Integer::NewFromUnsigned(iso, index),
+                      info);
+}
+Intercepted xoIndexedDefiner(uint32_t index,
+                             const PropertyDescriptor& desc,
+                             const PropertyCallbackInfo<void>& info) {
+  Isolate* iso = info.GetIsolate();
+  return xoDefine(iso, info.Holder(), Integer::NewFromUnsigned(iso, index),
+                  desc);
+}
 Intercepted xoIndexedDeleter(uint32_t index,
                              const PropertyCallbackInfo<Boolean>& info) {
   Isolate* iso = info.GetIsolate();
@@ -2661,12 +2782,19 @@ void ObjectTemplateSetCrossOriginHandler(TemplatePtr ptr) {
   Local<ObjectTemplate> obj_tmpl = tmpl.As<ObjectTemplate>();
   NamedPropertyHandlerConfiguration named(xoNamedGetter, xoNamedSetter,
                                           xoNamedQuery, xoNamedDeleter, xoKeys);
+  named.definer = xoNamedDefiner;
+  named.descriptor = xoNamedDescriptor;
   // The own keys are answered once, by the named handler.
   IndexedPropertyHandlerConfiguration indexed(
       xoIndexedGetter, xoIndexedSetter, xoIndexedQuery, xoIndexedDeleter,
       nullptr);
+  indexed.definer = xoIndexedDefiner;
+  indexed.descriptor = xoIndexedDescriptor;
   obj_tmpl->SetAccessCheckCallbackAndHandler(denyCrossOriginAccess, named,
                                              indexed);
+  // What a refused access has no interceptor for is the accessing context's
+  // hook's to throw, too (ContextUse installs it per thread).
+  iso->SetFailedAccessCheckCallbackFunction(xoFailedAccessCheck);
 }
 
 /********** Context **********/

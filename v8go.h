@@ -604,6 +604,7 @@ int ValueIsName(ValuePtr ptr);
 int ValueIsString(ValuePtr ptr);
 int ValueIsSymbol(ValuePtr ptr);
 int ValueIsFunction(ValuePtr ptr);
+int ValueCreationContextRef(ValuePtr ptr);
 int ValueIsObject(ValuePtr ptr);
 int ValueIsBigInt(ValuePtr ptr);
 int ValueIsBoolean(ValuePtr ptr);
@@ -684,6 +685,10 @@ extern RtnValue FunctionCall(ValuePtr ptr,
                              ValuePtr recv,
                              int argc,
                              ValuePtr argv[]);
+extern RtnValue FunctionCallInCreationContext(ValuePtr ptr,
+                                              ValuePtr recv,
+                                              int argc,
+                                              ValuePtr argv[]);
 RtnValue FunctionNewInstance(ValuePtr ptr, int argc, ValuePtr args[]);
 ValuePtr FunctionSourceMapUrl(ValuePtr ptr);
 extern void FunctionSetName(ValuePtr ptr, const char* name, int len);

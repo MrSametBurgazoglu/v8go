@@ -324,6 +324,17 @@ func (v *Value) IsFunction() bool {
 	return C.ValueIsFunction(v.ptr) != 0
 }
 
+// CreationContextRef is the Ref of the context the object was created in --
+// a function's realm, which a callback's caller is not -- or 0 for a
+// primitive, an object V8 knows no creation context for, or a context v8go
+// did not make.
+func (v *Value) CreationContextRef() int {
+	if v == nil || v.ptr == nil {
+		return 0
+	}
+	return int(C.ValueCreationContextRef(v.ptr))
+}
+
 // IsObject returns true if this value is an object.
 func (v *Value) IsObject() bool {
 	return v.ctx != nil && C.ValueIsObject(v.ptr) != 0

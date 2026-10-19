@@ -39,6 +39,27 @@ func (fn *Function) Call(recv Valuer, args ...Valuer) (*Value, error) {
 	return valueResult(fn.ctx, rtn)
 }
 
+// CallInCreationContext is Call with the function's own context entered:
+// the context V8 reports as entered while it runs -- HTML's entry realm for
+// a callback -- is the function's, not that of the context holding the
+// handle. A function whose creation context v8go did not make is called
+// as Call calls it.
+func (fn *Function) CallInCreationContext(recv Valuer, args ...Valuer) (*Value, error) {
+	if fn == nil || fn.Value == nil || fn.ctx == nil || getContext(fn.ctx.ref) == nil {
+		return nil, errors.New("v8go: the function's context has been closed")
+	}
+	var argptr *C.ValuePtr
+	if len(args) > 0 {
+		var cArgs = make([]C.ValuePtr, len(args))
+		for i, arg := range args {
+			cArgs[i] = arg.value().ptr
+		}
+		argptr = (*C.ValuePtr)(unsafe.Pointer(&cArgs[0]))
+	}
+	rtn := C.FunctionCallInCreationContext(fn.ptr, recv.value().ptr, C.int(len(args)), argptr)
+	return valueResult(fn.ctx, rtn)
+}
+
 // Invoke a constructor function to create an object instance.
 func (fn *Function) NewInstance(args ...Valuer) (*Object, error) {
 	var argptr *C.ValuePtr

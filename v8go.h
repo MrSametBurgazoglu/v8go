@@ -60,6 +60,8 @@ typedef m_ctx* ContextPtr;
 typedef m_value* ValuePtr;
 typedef m_template* TemplatePtr;
 typedef m_unboundScript* UnboundScriptPtr;
+typedef struct m_scriptStream m_scriptStream;
+typedef m_scriptStream* ScriptStreamPtr;
 typedef m_inspector* InspectorPtr;
 typedef m_inspectorSession* InspectorSessionPtr;
 
@@ -215,6 +217,25 @@ extern RtnError IsolateCheckModuleSyntax(IsolatePtr iso_ptr,
                                          const char* s,
                                          int s_len,
                                          const char* o);
+// Script streaming: a classic script parsed and compiled off the isolate's
+// thread. Start on the isolate's thread, Run on any other, Compile back on
+// the isolate's thread with the same source, then Free.
+extern ScriptStreamPtr IsolateStartScriptStream(IsolatePtr iso_ptr,
+                                                const char* s,
+                                                int s_len);
+extern void ScriptStreamRun(ScriptStreamPtr stream);
+// An incremental stream: its source is pushed in chunks, from any thread,
+// while Run parses on its own; Finish says no more is coming.
+extern ScriptStreamPtr IsolateStartIncrementalScriptStream(IsolatePtr iso_ptr);
+extern void ScriptStreamPush(ScriptStreamPtr stream, const char* s, int s_len);
+extern void ScriptStreamFinish(ScriptStreamPtr stream);
+extern RtnUnboundScript ScriptStreamCompile(IsolatePtr iso_ptr,
+                                            ScriptStreamPtr stream,
+                                            const char* s,
+                                            int s_len,
+                                            const char* o,
+                                            int opaque);
+extern void ScriptStreamFree(ScriptStreamPtr stream);
 extern RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso_ptr,
                                                     const char* source,
                                                     int source_len,

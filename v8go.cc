@@ -8,6 +8,9 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <condition_variable>
+#include <mutex>
 #include <limits>
 #include <iostream>
 #include <sstream>
@@ -1205,6 +1208,182 @@ IsolateHStatistics IsolationGetHeapStatistics(IsolatePtr iso) {
                             hs.peak_malloced_memory(),
                             hs.number_of_native_contexts(),
                             hs.number_of_detached_contexts()};
+}
+
+/********** Script streaming **********/
+
+// OneShotSourceStream hands V8 the whole source as one chunk: the embedder
+// streams a script it already holds, so that the parse and compile run on a
+// background thread rather than on the isolate's. V8 takes ownership of the
+// chunk it is given.
+class OneShotSourceStream : public ScriptCompiler::ExternalSourceStream {
+ public:
+  OneShotSourceStream(const char* s, int len)
+      : data_(len > 0 ? new uint8_t[len] : nullptr), len_(len > 0 ? len : 0) {
+    if (data_) {
+      memcpy(data_, s, len_);
+    }
+  }
+  ~OneShotSourceStream() override { delete[] data_; }
+
+  size_t GetMoreData(const uint8_t** src) override {
+    if (!data_) {
+      *src = nullptr;
+      return 0;
+    }
+    *src = data_;
+    size_t n = len_;
+    data_ = nullptr;
+    len_ = 0;
+    return n;
+  }
+
+ private:
+  uint8_t* data_;
+  size_t len_;
+};
+
+// QueueSourceStream is a source pushed in chunks as they arrive, from any
+// thread, while V8 parses on its background thread: GetMoreData waits for
+// the next chunk or the end.
+class QueueSourceStream : public ScriptCompiler::ExternalSourceStream {
+ public:
+  ~QueueSourceStream() override {
+    for (auto& chunk : chunks_) {
+      delete[] chunk.first;
+    }
+  }
+
+  void Push(const char* s, int len) {
+    if (len <= 0) {
+      return;
+    }
+    uint8_t* copy = new uint8_t[len];
+    memcpy(copy, s, len);
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (finished_) {
+        delete[] copy;
+        return;
+      }
+      chunks_.emplace_back(copy, static_cast<size_t>(len));
+    }
+    cv_.notify_one();
+  }
+
+  void Finish() {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      finished_ = true;
+    }
+    cv_.notify_one();
+  }
+
+  size_t GetMoreData(const uint8_t** src) override {
+    std::unique_lock<std::mutex> lock(mu_);
+    cv_.wait(lock, [this] { return !chunks_.empty() || finished_; });
+    if (chunks_.empty()) {
+      *src = nullptr;
+      return 0;
+    }
+    auto chunk = chunks_.front();
+    chunks_.pop_front();
+    *src = chunk.first;
+    return chunk.second;
+  }
+
+ private:
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::deque<std::pair<uint8_t*, size_t>> chunks_;
+  bool finished_ = false;
+};
+
+struct m_scriptStream {
+  std::unique_ptr<ScriptCompiler::StreamedSource> source;
+  std::unique_ptr<ScriptCompiler::ScriptStreamingTask> task;
+  // The pushed source, when there is one; owned by source.
+  QueueSourceStream* queue = nullptr;
+};
+
+ScriptStreamPtr IsolateStartIncrementalScriptStream(IsolatePtr iso) {
+  ISOLATE_SCOPE(iso);
+  m_scriptStream* stream = new m_scriptStream;
+  auto queue = std::make_unique<QueueSourceStream>();
+  stream->queue = queue.get();
+  stream->source.reset(new ScriptCompiler::StreamedSource(
+      std::move(queue), ScriptCompiler::StreamedSource::UTF8));
+  stream->task.reset(
+      ScriptCompiler::StartStreaming(iso, stream->source.get()));
+  return stream;
+}
+
+void ScriptStreamPush(ScriptStreamPtr stream, const char* s, int s_len) {
+  if (stream && stream->queue) {
+    stream->queue->Push(s, s_len);
+  }
+}
+
+void ScriptStreamFinish(ScriptStreamPtr stream) {
+  if (stream && stream->queue) {
+    stream->queue->Finish();
+  }
+}
+
+ScriptStreamPtr IsolateStartScriptStream(IsolatePtr iso,
+                                         const char* s,
+                                         int s_len) {
+  ISOLATE_SCOPE(iso);
+  m_scriptStream* stream = new m_scriptStream;
+  stream->source.reset(new ScriptCompiler::StreamedSource(
+      std::make_unique<OneShotSourceStream>(s, s_len),
+      ScriptCompiler::StreamedSource::UTF8));
+  stream->task.reset(
+      ScriptCompiler::StartStreaming(iso, stream->source.get()));
+  return stream;
+}
+
+void ScriptStreamRun(ScriptStreamPtr stream) {
+  if (stream && stream->task) {
+    stream->task->Run();
+  }
+}
+
+RtnUnboundScript ScriptStreamCompile(IsolatePtr iso,
+                                     ScriptStreamPtr stream,
+                                     const char* s,
+                                     int s_len,
+                                     const char* o,
+                                     int opaque) {
+  ISOLATE_SCOPE_INTERNAL_CONTEXT(iso);
+  TryCatch try_catch(iso);
+  Local<Context> local_ctx = ctx->ptr.Get(iso);
+  Context::Scope context_scope(local_ctx);
+
+  RtnUnboundScript rtn = {};
+  Local<String> src =
+      String::NewFromUtf8(iso, s, NewStringType::kNormal, s_len)
+          .ToLocalChecked();
+  Local<String> ogn =
+      String::NewFromUtf8(iso, o, NewStringType::kNormal).ToLocalChecked();
+  // As IsolateCompileUnboundScript: an opaque script's errors are muted.
+  ScriptOrigin script_origin(ogn, 0, 0, false, -1, Local<Value>(),
+                             opaque != 0);
+  Local<Script> script;
+  if (!ScriptCompiler::Compile(local_ctx, stream->source.get(), src,
+                               script_origin)
+           .ToLocal(&script)) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+  m_unboundScript* us = new m_unboundScript;
+  us->ptr.Reset(iso, script->GetUnboundScript());
+  rtn.ptr = tracked_unbound_script(ctx, us);
+  return rtn;
+}
+
+void ScriptStreamFree(ScriptStreamPtr stream) {
+  delete stream;
 }
 
 RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso,

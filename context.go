@@ -416,6 +416,50 @@ func (i *Isolate) SetCodeGenerationCheck(check CodeGenerationCheck) {
 
 var codeGenerationChecks sync.Map
 
+// WasmCodeGenerationCheck is asked before V8 compiles a WebAssembly module
+// in ctx — WebAssembly.compile, instantiate, the Module constructor and the
+// streaming forms — and answers whether it may. ctx is nil for a context
+// v8go did not make. A refusal makes the call throw a CompileError (the
+// asynchronous forms reject with one). The callback runs inside V8 and must
+// not run script.
+type WasmCodeGenerationCheck func(ctx *Context) bool
+
+// SetWasmCodeGenerationCheck installs check as the isolate's
+// AllowWasmCodeGenerationCallback; nil allows every compilation again.
+func (i *Isolate) SetWasmCodeGenerationCheck(check WasmCodeGenerationCheck) {
+	if i.ptr == nil {
+		return
+	}
+	if check == nil {
+		wasmCodeGenerationChecks.Delete(i.ptr)
+	} else {
+		wasmCodeGenerationChecks.Store(i.ptr, check)
+	}
+	C.IsolateSetWasmCodeGenerationCheckCallback(i.ptr)
+}
+
+var wasmCodeGenerationChecks sync.Map
+
+//export goWasmCodeGenerationCheck
+func goWasmCodeGenerationCheck(iso C.IsolatePtr, ctxRef C.int) C.int {
+	v, ok := wasmCodeGenerationChecks.Load(iso)
+	if !ok {
+		return 1
+	}
+	check, ok := v.(WasmCodeGenerationCheck)
+	if !ok || check == nil {
+		return 1
+	}
+	var ctx *Context
+	if ctxRef != 0 {
+		ctx = getContext(int(ctxRef))
+	}
+	if check(ctx) {
+		return 1
+	}
+	return 0
+}
+
 //export goCodeGenerationCheck
 func goCodeGenerationCheck(iso C.IsolatePtr, ctxRef C.int, val C.ValuePtr, codeLike C.int, out **C.char, outLen *C.int) C.int {
 	v, ok := codeGenerationChecks.Load(iso)

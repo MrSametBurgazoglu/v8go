@@ -120,3 +120,36 @@ func TestWebAssemblyValidateRejects(t *testing.T) {
 		t.Fatal("WebAssembly.validate accepted [1,2,3] as a valid module; expected rejection")
 	}
 }
+
+// SetWasmCodeGenerationCheck decides every WebAssembly compilation: a
+// refusal throws a CompileError from the Module constructor, and the check
+// sees the context the compilation runs in.
+func TestWasmCodeGenerationCheck(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+	ctx := v8.NewContext(iso)
+	defer ctx.Close()
+	allow := true
+	var seen *v8.Context
+	iso.SetWasmCodeGenerationCheck(func(c *v8.Context) bool {
+		seen = c
+		return allow
+	})
+	src := "new WebAssembly.Module(new Uint8Array([" + jsByteArrayLiteral(wasmAddModuleBytes) + "])) instanceof WebAssembly.Module"
+	val, err := ctx.RunScript(src, "allowed.js")
+	if err != nil || !val.Boolean() {
+		t.Fatalf("allowed compile: %v %v", val, err)
+	}
+	if seen != ctx {
+		t.Errorf("check saw context %p, want %p", seen, ctx)
+	}
+	allow = false
+	val, err = ctx.RunScript("try { "+src+"; 'compiled' } catch (e) { e.constructor.name }", "refused.js")
+	if err != nil || val.String() != "CompileError" {
+		t.Fatalf("refused compile: %v %v", val, err)
+	}
+	iso.SetWasmCodeGenerationCheck(nil)
+	if val, err := ctx.RunScript(src, "cleared.js"); err != nil || !val.Boolean() {
+		t.Fatalf("cleared check: %v %v", val, err)
+	}
+}

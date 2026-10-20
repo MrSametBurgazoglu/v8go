@@ -381,6 +381,12 @@ type CompileOptions struct {
 	// compile, comes back as a JSError whose Opaque is true. HTML calls this
 	// the script's "muted errors".
 	Opaque bool
+
+	// LineOffset and ColumnOffset place the script in its resource, from
+	// zero (the column applies to the first line): an inline script starts
+	// on the document's line it is written on, and its errors and stack
+	// frames report that resource's lines (V8's ScriptOrigin offsets).
+	LineOffset, ColumnOffset int
 }
 
 // CheckModuleSyntax parses source as a module and reports its early error,
@@ -425,6 +431,8 @@ func (i *Isolate) CompileUnboundScript(source, origin string, opts CompileOption
 	if opts.Opaque {
 		cOptions.opaque = 1
 	}
+	cOptions.lineOffset = C.int(opts.LineOffset)
+	cOptions.columnOffset = C.int(opts.ColumnOffset)
 
 	rtn := C.IsolateCompileUnboundScript(i.ptr, cSource, C.int(len(source)), cOrigin, cOptions)
 	if rtn.ptr == nil {

@@ -243,3 +243,41 @@ func TestObjectTemplateSetImmutableProto(t *testing.T) {
 		}
 	}
 }
+
+// HasRealNamedProperty sees own properties and not what an interceptor
+// answers, so a masking interceptor can let an expando win.
+func TestHasRealNamedPropertySkipsInterceptors(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+	tmpl := v8.NewObjectTemplate(iso)
+	tmpl.SetNamedPropertyInterceptor(v8.PropertyInterceptor{
+		Getter: func(info *v8.FunctionCallbackInfo) *v8.Value {
+			name := info.Args()[0].String()
+			if name != "named" && name != "both" {
+				return nil
+			}
+			if info.This().HasRealNamedProperty(name) {
+				return nil // an own property shadows the named one
+			}
+			v, _ := v8.NewValue(iso, "from-interceptor")
+			return v
+		},
+		Flags: v8.HandlerOnlyInterceptStrings,
+	})
+	global := v8.NewObjectTemplate(iso)
+	global.Set("o", tmpl)
+	ctx := v8.NewContext(iso, global)
+	defer ctx.Close()
+	got, err := ctx.RunScript(`Object.defineProperty(o, 'both', {value: 'own', configurable: true}); o[7] = 1; [o.named, o.both, o.other].join(',')`, "t.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.String() != "from-interceptor,own," {
+		t.Errorf("got %q", got.String())
+	}
+	obj, _ := ctx.Global().Get("o")
+	o := obj.Object()
+	if !o.HasRealNamedProperty("both") || o.HasRealNamedProperty("named") || !o.HasRealIndexedProperty(7) || o.HasRealIndexedProperty(8) {
+		t.Error("HasRealNamedProperty/HasRealIndexedProperty answered wrong")
+	}
+}

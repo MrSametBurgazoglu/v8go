@@ -4414,6 +4414,18 @@ int ObjectHasIdx(ValuePtr ptr, uint32_t idx) {
   return obj->Has(local_ctx, idx).FromMaybe(false);
 }
 
+int ObjectHasRealNamedProperty(ValuePtr ptr, const char* key) {
+  LOCAL_OBJECT(ptr);
+  Local<String> key_val =
+      String::NewFromUtf8(iso, key, NewStringType::kNormal).ToLocalChecked();
+  return obj->HasRealNamedProperty(local_ctx, key_val).FromMaybe(false);
+}
+
+int ObjectHasRealIndexedProperty(ValuePtr ptr, uint32_t idx) {
+  LOCAL_OBJECT(ptr);
+  return obj->HasRealIndexedProperty(local_ctx, idx).FromMaybe(false);
+}
+
 int ObjectDelete(ValuePtr ptr, const char* key) {
   LOCAL_OBJECT(ptr);
   Local<String> key_val =

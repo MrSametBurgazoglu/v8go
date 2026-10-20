@@ -688,6 +688,10 @@ extern RtnValue ContextPrivateSymbolFunction(ContextPtr ctx);
 extern RtnValue ObjectGetIdx(ValuePtr ptr, uint32_t idx);
 extern ValuePtr ObjectGetInternalField(ValuePtr ptr, int idx);
 int ObjectHas(ValuePtr ptr, const char* key);
+// ObjectHasRealNamedProperty and ObjectHasRealIndexedProperty ask for an own
+// property without consulting the object's interceptors.
+int ObjectHasRealNamedProperty(ValuePtr ptr, const char* key);
+int ObjectHasRealIndexedProperty(ValuePtr ptr, uint32_t idx);
 int ObjectHasIdx(ValuePtr ptr, uint32_t idx);
 int ObjectDelete(ValuePtr ptr, const char* key);
 int ObjectDeleteIdx(ValuePtr ptr, uint32_t idx);

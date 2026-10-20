@@ -189,6 +189,23 @@ func (o *Object) Has(key string) bool {
 	return C.ObjectHas(o.ptr, ckey) != 0
 }
 
+// HasRealNamedProperty reports whether the object has an own property key,
+// without consulting its interceptors. An interceptor that has to know
+// whether a name is already an own property of its holder — WebIDL's named
+// property visibility, an expando that shadows a named property — asks this:
+// an ordinary own-property check from inside the interceptor would ask the
+// interceptor again.
+func (o *Object) HasRealNamedProperty(key string) bool {
+	ckey := C.CString(key)
+	defer C.free(unsafe.Pointer(ckey))
+	return C.ObjectHasRealNamedProperty(o.ptr, ckey) != 0
+}
+
+// HasRealIndexedProperty is HasRealNamedProperty for an array index.
+func (o *Object) HasRealIndexedProperty(idx uint32) bool {
+	return C.ObjectHasRealIndexedProperty(o.ptr, C.uint32_t(idx)) != 0
+}
+
 // HasIdx returns true if the object has a value at the given index.
 func (o *Object) HasIdx(idx uint32) bool {
 	return C.ObjectHasIdx(o.ptr, C.uint32_t(idx)) != 0

@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -2297,22 +2298,73 @@ TemplatePtr TemplateSetSymbolMethod(TemplatePtr ptr,
 // single argument (or the index as a number) and the receiver as `this`, so an
 // embedder writes an interceptor the way it writes any other callback.
 
+extern "C++" {
 namespace {
 
-// interceptorRefs is the set of callback refs one handler was built from,
-// stored in the template's data so the trampolines can find them. V8 gives
-// each callback its own Data slot, so each is given just its own ref.
-struct InterceptorCall {
-  Isolate* iso;
-  m_ctx* ctx;
-  int ctx_ref;
-  int callback_ref;
+// The callback refs of one handler, by operation. V8 gives a handler a single
+// Data slot, so the slot holds an index into this table rather than one ref:
+// the operations of one interceptor reach their own Go callbacks, not the
+// getter's (the enumerator used to call the getter's ref, with no key).
+//
+// The table only grows. A template is built once per realm shape, so it holds
+// a handful of entries for the life of the process; entries are copied out
+// under the lock, so a push from another isolate's thread cannot move one
+// under a reader.
+enum InterceptorOp {
+  kOpGetter = 0,
+  kOpSetter,
+  kOpQuery,
+  kOpDeleter,
+  kOpEnumerator,
+  kOpDefiner,
+  kOpDescriptor,
+  kOpCount
 };
 
-bool interceptorContext(const PropertyCallbackInfo<Value>& info,
+struct InterceptorRefs {
+  int refs[kOpCount];
+};
+
+std::mutex interceptor_refs_mu;
+std::vector<InterceptorRefs> interceptor_refs;
+
+int registerInterceptorRefs(const int* refs) {
+  InterceptorRefs entry;
+  for (int i = 0; i < kOpCount; i++) {
+    entry.refs[i] = refs[i];
+  }
+  std::lock_guard<std::mutex> lock(interceptor_refs_mu);
+  interceptor_refs.push_back(entry);
+  return static_cast<int>(interceptor_refs.size() - 1);
+}
+
+int interceptorRef(Local<Value> data, InterceptorOp op) {
+  if (data.IsEmpty() || !data->IsInt32()) {
+    return -1;
+  }
+  int index = data.As<Int32>()->Value();
+  std::lock_guard<std::mutex> lock(interceptor_refs_mu);
+  if (index < 0 || static_cast<size_t>(index) >= interceptor_refs.size()) {
+    return -1;
+  }
+  return interceptor_refs[index].refs[op];
+}
+
+// interceptorContext finds the Go context of the running realm and the ref of
+// this operation's callback, or answers false when there is none to call (no
+// callback for the operation, or a closed context — the interceptor then
+// declines rather than dereferencing null in tracked_value; see
+// FunctionTemplateCallback).
+template <typename T>
+bool interceptorContext(const PropertyCallbackInfo<T>& info,
+                        InterceptorOp op,
                         int* ctx_ref,
                         m_ctx** ctx,
                         int* callback_ref) {
+  *callback_ref = interceptorRef(info.Data(), op);
+  if (*callback_ref < 0) {
+    return false;
+  }
   Isolate* iso = info.GetIsolate();
   Local<Context> local_ctx = iso->GetCurrentContext();
   if (local_ctx.IsEmpty()) {
@@ -2324,21 +2376,18 @@ bool interceptorContext(const PropertyCallbackInfo<Value>& info,
   }
   *ctx_ref = ref_val.As<Integer>()->Value();
   *ctx = goContext(*ctx_ref);
-  // A closed context: the interceptor declines rather than dereferencing null
-  // in callInterceptor's tracked_value. See FunctionTemplateCallback.
-  if (*ctx == nullptr) {
-    return false;
-  }
-  *callback_ref = info.Data().As<Integer>()->Value();
-  return true;
+  return *ctx != nullptr;
 }
 
-// callInterceptor invokes the Go callback with |key| as its only argument and
-// the receiver as `this`, and answers the returned value (nullptr when the Go
-// side declined).
+// callInterceptor invokes the Go callback with |args| and the holder as
+// `this`, and answers the returned value (nullptr when the Go side declined).
+// The holder, not the receiver: for an interceptor on a prototype — the
+// window's named properties object — the receiver is the window, and the
+// object whose names are asked for is the holder.
 ValuePtr callInterceptor(Isolate* iso,
                          Local<Object> self,
-                         Local<Value> key,
+                         Local<Value>* args,
+                         int argc,
                          int ctx_ref,
                          m_ctx* ctx,
                          int callback_ref) {
@@ -2349,15 +2398,16 @@ ValuePtr callInterceptor(Isolate* iso,
   _this->ctx = ctx;
   _this->ptr.Reset(iso, Global<Value>(iso, self));
 
-  ValuePtr thisAndArgs[2];
+  ValuePtr thisAndArgs[3];
   thisAndArgs[0] = tracked_value(ctx, _this);
-
-  m_value* arg = new m_value;
-  arg->id = 0;
-  arg->iso = iso;
-  arg->ctx = ctx;
-  arg->ptr.Reset(iso, Global<Value>(iso, key));
-  thisAndArgs[1] = tracked_value(ctx, arg);
+  for (int i = 0; i < argc && i < 2; i++) {
+    m_value* arg = new m_value;
+    arg->id = 0;
+    arg->iso = iso;
+    arg->ctx = ctx;
+    arg->ptr.Reset(iso, Global<Value>(iso, args[i]));
+    thisAndArgs[i + 1] = tracked_value(ctx, arg);
+  }
 
   int64_t this_field0 = kNoInternalField;
   if (self->InternalFieldCount() > 0) {
@@ -2369,24 +2419,31 @@ ValuePtr callInterceptor(Isolate* iso,
       }
     }
   }
-  return goFunctionCallback(ctx_ref, callback_ref, thisAndArgs, 1, this_field0);
+  return goFunctionCallback(ctx_ref, callback_ref, thisAndArgs, argc,
+                            this_field0);
 }
 
-// The getters answer Intercepted::kYes when they handled the request and kNo
-// when V8 should keep looking — the object's own properties, then its
-// prototype chain. Answering kYes with undefined would make every unknown name
-// on a collection resolve to undefined and stop the lookup, which is how
-// `document.forms.constructor` would come back undefined.
-Intercepted namedGetter(Local<Name> name,
-                        const PropertyCallbackInfo<Value>& info) {
+// invoke runs one operation's callback and answers its result, or an empty
+// handle when the Go side declined (no callback, nil, or undefined). An
+// exception the callback threw makes the operation intercepted: V8 then
+// propagates it, which is what a throwing named getter or setter means.
+template <typename T>
+Intercepted invoke(const PropertyCallbackInfo<T>& info,
+                   InterceptorOp op,
+                   Local<Value>* args,
+                   int argc,
+                   Local<Value>* out) {
   int ctx_ref, callback_ref;
   m_ctx* ctx;
-  if (!interceptorContext(info, &ctx_ref, &ctx, &callback_ref)) {
+  if (!interceptorContext(info, op, &ctx_ref, &ctx, &callback_ref)) {
     return Intercepted::kNo;
   }
   Isolate* iso = info.GetIsolate();
-  ValuePtr val =
-      callInterceptor(iso, info.Holder(), name, ctx_ref, ctx, callback_ref);
+  ValuePtr val = callInterceptor(iso, info.HolderV2(), args, argc, ctx_ref, ctx,
+                                 callback_ref);
+  if (iso->HasPendingException()) {
+    return Intercepted::kYes;
+  }
   if (val == nullptr) {
     return Intercepted::kNo;
   }
@@ -2394,62 +2451,172 @@ Intercepted namedGetter(Local<Name> name,
   if (result->IsUndefined()) {
     return Intercepted::kNo;  // declined, expressed as undefined
   }
-  info.GetReturnValue().Set(result);
+  *out = result;
   return Intercepted::kYes;
+}
+
+// The getters answer Intercepted::kYes when they handled the request and kNo
+// when V8 should keep looking — the object's own properties, then its
+// prototype chain. Answering kYes with undefined would make every unknown name
+// on a collection resolve to undefined and stop the lookup, which is how
+// `document.forms.constructor` would come back undefined.
+Intercepted getterResult(const PropertyCallbackInfo<Value>& info,
+                         Local<Value> key) {
+  Local<Value> out;
+  Intercepted r = invoke(info, kOpGetter, &key, 1, &out);
+  if (r == Intercepted::kYes && !out.IsEmpty()) {
+    info.GetReturnValue().Set(out);
+  }
+  return r;
+}
+
+// The setter, deleter and definer answer a boolean: true when the operation
+// succeeded, false when it failed — V8 then throws a TypeError in strict code
+// and fails silently in sloppy code, as [[Set]], [[Delete]] and
+// [[DefineOwnProperty]] returning false do.
+template <typename T>
+Intercepted booleanResult(const PropertyCallbackInfo<T>& info,
+                          InterceptorOp op,
+                          Local<Value>* args,
+                          int argc) {
+  Local<Value> out;
+  Intercepted r = invoke(info, op, args, argc, &out);
+  if (r == Intercepted::kYes && !out.IsEmpty()) {
+    info.GetReturnValue().Set(out->BooleanValue(info.GetIsolate()));
+  }
+  return r;
+}
+
+Intercepted queryResult(const PropertyCallbackInfo<Integer>& info,
+                        Local<Value> key) {
+  Local<Value> out;
+  Intercepted r = invoke(info, kOpQuery, &key, 1, &out);
+  if (r == Intercepted::kYes && !out.IsEmpty() && out->IsNumber()) {
+    info.GetReturnValue().Set(
+        Integer::New(info.GetIsolate(),
+                     static_cast<int32_t>(out.As<Number>()->Value())));
+  }
+  return r;
+}
+
+Intercepted descriptorResult(const PropertyCallbackInfo<Value>& info,
+                             Local<Value> key) {
+  Local<Value> out;
+  Intercepted r = invoke(info, kOpDescriptor, &key, 1, &out);
+  if (r == Intercepted::kYes && !out.IsEmpty()) {
+    if (!out->IsObject()) {
+      return Intercepted::kNo;
+    }
+    info.GetReturnValue().Set(out);
+  }
+  return r;
+}
+
+// interceptorDescriptorObject spells a PropertyDescriptor as the object
+// Object.getOwnPropertyDescriptor would give, with only the fields present.
+Local<Value> interceptorDescriptorObject(Isolate* iso, const PropertyDescriptor& desc) {
+  Local<Context> ctx = iso->GetCurrentContext();
+  Local<Object> obj = Object::New(iso);
+  auto set = [&](const char* name, Local<Value> v) {
+    obj->Set(ctx, String::NewFromUtf8(iso, name).ToLocalChecked(), v).Check();
+  };
+  if (desc.has_value()) set("value", desc.value());
+  if (desc.has_writable()) set("writable", Boolean::New(iso, desc.writable()));
+  if (desc.has_get()) set("get", desc.get());
+  if (desc.has_set()) set("set", desc.set());
+  if (desc.has_enumerable())
+    set("enumerable", Boolean::New(iso, desc.enumerable()));
+  if (desc.has_configurable())
+    set("configurable", Boolean::New(iso, desc.configurable()));
+  return obj;
+}
+
+Local<Value> indexKey(Isolate* iso, uint32_t index) {
+  return Integer::NewFromUnsigned(iso, index);
+}
+
+Intercepted namedGetter(Local<Name> name,
+                        const PropertyCallbackInfo<Value>& info) {
+  return getterResult(info, name);
 }
 
 Intercepted indexedGetter(uint32_t index,
                           const PropertyCallbackInfo<Value>& info) {
-  int ctx_ref, callback_ref;
-  m_ctx* ctx;
-  if (!interceptorContext(info, &ctx_ref, &ctx, &callback_ref)) {
-    return Intercepted::kNo;
-  }
-  Isolate* iso = info.GetIsolate();
-  Local<Value> key = Integer::NewFromUnsigned(iso, index);
-  ValuePtr val =
-      callInterceptor(iso, info.Holder(), key, ctx_ref, ctx, callback_ref);
-  if (val == nullptr) {
-    return Intercepted::kNo;
-  }
-  Local<Value> result = val->ptr.Get(iso);
-  if (result->IsUndefined()) {
-    return Intercepted::kNo;
-  }
-  info.GetReturnValue().Set(result);
-  return Intercepted::kYes;
+  return getterResult(info, indexKey(info.GetIsolate(), index));
 }
 
-void namedEnumerator(const PropertyCallbackInfo<Array>& info) {
+Intercepted namedSetter(Local<Name> name,
+                        Local<Value> value,
+                        const PropertyCallbackInfo<void>& info) {
+  Local<Value> args[2] = {name, value};
+  return booleanResult(info, kOpSetter, args, 2);
+}
+
+Intercepted indexedSetter(uint32_t index,
+                          Local<Value> value,
+                          const PropertyCallbackInfo<void>& info) {
+  Local<Value> args[2] = {indexKey(info.GetIsolate(), index), value};
+  return booleanResult(info, kOpSetter, args, 2);
+}
+
+Intercepted namedQuery(Local<Name> name,
+                       const PropertyCallbackInfo<Integer>& info) {
+  return queryResult(info, name);
+}
+
+Intercepted indexedQuery(uint32_t index,
+                         const PropertyCallbackInfo<Integer>& info) {
+  return queryResult(info, indexKey(info.GetIsolate(), index));
+}
+
+Intercepted namedDeleter(Local<Name> name,
+                         const PropertyCallbackInfo<Boolean>& info) {
+  Local<Value> key = name;
+  return booleanResult(info, kOpDeleter, &key, 1);
+}
+
+Intercepted indexedDeleter(uint32_t index,
+                           const PropertyCallbackInfo<Boolean>& info) {
+  Local<Value> key = indexKey(info.GetIsolate(), index);
+  return booleanResult(info, kOpDeleter, &key, 1);
+}
+
+Intercepted namedDefiner(Local<Name> name,
+                         const PropertyDescriptor& desc,
+                         const PropertyCallbackInfo<void>& info) {
+  Local<Value> args[2] = {name, interceptorDescriptorObject(info.GetIsolate(), desc)};
+  return booleanResult(info, kOpDefiner, args, 2);
+}
+
+Intercepted indexedDefiner(uint32_t index,
+                           const PropertyDescriptor& desc,
+                           const PropertyCallbackInfo<void>& info) {
+  Local<Value> args[2] = {indexKey(info.GetIsolate(), index),
+                          interceptorDescriptorObject(info.GetIsolate(), desc)};
+  return booleanResult(info, kOpDefiner, args, 2);
+}
+
+Intercepted namedDescriptor(Local<Name> name,
+                            const PropertyCallbackInfo<Value>& info) {
+  return descriptorResult(info, name);
+}
+
+Intercepted indexedDescriptor(uint32_t index,
+                              const PropertyCallbackInfo<Value>& info) {
+  return descriptorResult(info, indexKey(info.GetIsolate(), index));
+}
+
+// The enumerator answers an array: of names for a named handler, of indices
+// (as numbers or strings) for an indexed one.
+void enumerator(const PropertyCallbackInfo<Array>& info) {
+  int ctx_ref, callback_ref;
+  m_ctx* ctx;
+  if (!interceptorContext(info, kOpEnumerator, &ctx_ref, &ctx, &callback_ref)) {
+    return;
+  }
   Isolate* iso = info.GetIsolate();
-  Local<Context> local_ctx = iso->GetCurrentContext();
-  if (local_ctx.IsEmpty()) {
-    return;
-  }
-  Local<Value> ref_val = local_ctx->GetEmbedderData(1);
-  if (ref_val.IsEmpty() || !ref_val->IsInt32()) {
-    return;
-  }
-  int ctx_ref = ref_val.As<Integer>()->Value();
-  m_ctx* ctx = goContext(ctx_ref);
-  // A closed context enumerates nothing rather than dereferencing null. See
-  // FunctionTemplateCallback.
-  if (ctx == nullptr) {
-    return;
-  }
-  ContextUse ctx_use(ctx);
-  int callback_ref = info.Data().As<Integer>()->Value();
-
-  m_value* _this = new m_value;
-  _this->id = 0;
-  _this->iso = iso;
-  _this->ctx = ctx;
-  _this->ptr.Reset(iso, Global<Value>(iso, info.Holder()));
-  ValuePtr thisAndArgs[1];
-  thisAndArgs[0] = tracked_value(ctx, _this);
-
-  ValuePtr val = goFunctionCallback(ctx_ref, callback_ref, thisAndArgs, 0,
-                                    kNoInternalField);
+  ValuePtr val = callInterceptor(iso, info.HolderV2(), nullptr, 0, ctx_ref, ctx,
+                                 callback_ref);
   if (val == nullptr) {
     return;
   }
@@ -2479,6 +2646,51 @@ PropertyHandlerFlags handlerFlags(int flags) {
 }
 
 }  // namespace
+}  // extern "C++"
+
+void ObjectTemplateSetPropertyInterceptor(TemplatePtr ptr,
+                                          int indexed,
+                                          int getter_ref,
+                                          int setter_ref,
+                                          int query_ref,
+                                          int deleter_ref,
+                                          int enumerator_ref,
+                                          int definer_ref,
+                                          int descriptor_ref,
+                                          int flags) {
+  LOCAL_TEMPLATE(ptr);
+  Local<ObjectTemplate> obj_tmpl = tmpl.As<ObjectTemplate>();
+  int refs[kOpCount] = {getter_ref,     setter_ref,  query_ref,     deleter_ref,
+                        enumerator_ref, definer_ref, descriptor_ref};
+  Local<Value> data = Integer::New(iso, registerInterceptorRefs(refs));
+  // V8 asks query OR descriptor, never both: a handler with a descriptor
+  // callback answers [[GetOwnProperty]] through it, and one with a query
+  // callback through the attributes. Passing only the ones given keeps the
+  // other path V8's own.
+  if (indexed) {
+    IndexedPropertyHandlerConfiguration config(
+        getter_ref >= 0 ? indexedGetter : nullptr,
+        setter_ref >= 0 ? indexedSetter : nullptr,
+        query_ref >= 0 ? indexedQuery : nullptr,
+        deleter_ref >= 0 ? indexedDeleter : nullptr,
+        enumerator_ref >= 0 ? enumerator : nullptr,
+        definer_ref >= 0 ? indexedDefiner : nullptr,
+        descriptor_ref >= 0 ? indexedDescriptor : nullptr, data,
+        handlerFlags(flags));
+    obj_tmpl->SetHandler(config);
+    return;
+  }
+  NamedPropertyHandlerConfiguration config(
+      getter_ref >= 0 ? namedGetter : nullptr,
+      setter_ref >= 0 ? namedSetter : nullptr,
+      query_ref >= 0 ? namedQuery : nullptr,
+      deleter_ref >= 0 ? namedDeleter : nullptr,
+      enumerator_ref >= 0 ? enumerator : nullptr,
+      definer_ref >= 0 ? namedDefiner : nullptr,
+      descriptor_ref >= 0 ? namedDescriptor : nullptr, data,
+      handlerFlags(flags));
+  obj_tmpl->SetHandler(config);
+}
 
 void ObjectTemplateSetNamedPropertyHandler(TemplatePtr ptr,
                                            int getter_ref,
@@ -2487,27 +2699,12 @@ void ObjectTemplateSetNamedPropertyHandler(TemplatePtr ptr,
                                            int deleter_ref,
                                            int enumerator_ref,
                                            int flags) {
-  LOCAL_TEMPLATE(ptr);
-  Local<ObjectTemplate> obj_tmpl = tmpl.As<ObjectTemplate>();
-
-  // Only the getter and the enumerator are wired. A setter, query or deleter
-  // needs a different signature each, and nothing in this engine's DOM needs
-  // one: a named-access object answers reads and enumerates, and writes fall
-  // through to the object itself, which is what the specification says for
-  // every one of them. Adding one later is mechanical; guessing at it now
-  // would be an untested code path with no caller.
-  (void)setter_ref;
-  (void)query_ref;
-  (void)deleter_ref;
-
   if (getter_ref < 0) {
     return;
   }
-  NamedPropertyHandlerConfiguration config(
-      namedGetter, nullptr, nullptr, nullptr,
-      enumerator_ref >= 0 ? namedEnumerator : nullptr,
-      Integer::New(iso, getter_ref), handlerFlags(flags));
-  obj_tmpl->SetHandler(config);
+  ObjectTemplateSetPropertyInterceptor(ptr, 0, getter_ref, setter_ref,
+                                       query_ref, deleter_ref, enumerator_ref,
+                                       -1, -1, flags);
 }
 
 void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
@@ -2517,20 +2714,17 @@ void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
                                              int deleter_ref,
                                              int enumerator_ref,
                                              int flags) {
-  LOCAL_TEMPLATE(ptr);
-  Local<ObjectTemplate> obj_tmpl = tmpl.As<ObjectTemplate>();
-  (void)setter_ref;
-  (void)query_ref;
-  (void)deleter_ref;
-  (void)enumerator_ref;
-
   if (getter_ref < 0) {
     return;
   }
-  IndexedPropertyHandlerConfiguration config(
-      indexedGetter, nullptr, nullptr, nullptr, nullptr,
-      Integer::New(iso, getter_ref), handlerFlags(flags));
-  obj_tmpl->SetHandler(config);
+  ObjectTemplateSetPropertyInterceptor(ptr, 1, getter_ref, setter_ref,
+                                       query_ref, deleter_ref, enumerator_ref,
+                                       -1, -1, flags);
+}
+
+void ObjectTemplateSetImmutableProto(TemplatePtr ptr) {
+  LOCAL_TEMPLATE(ptr);
+  tmpl.As<ObjectTemplate>()->SetImmutableProto();
 }
 
 // ---- cross-origin access through a global proxy ----------------------------
@@ -4218,6 +4412,18 @@ int ObjectHas(ValuePtr ptr, const char* key) {
 int ObjectHasIdx(ValuePtr ptr, uint32_t idx) {
   LOCAL_OBJECT(ptr);
   return obj->Has(local_ctx, idx).FromMaybe(false);
+}
+
+int ObjectHasRealNamedProperty(ValuePtr ptr, const char* key) {
+  LOCAL_OBJECT(ptr);
+  Local<String> key_val =
+      String::NewFromUtf8(iso, key, NewStringType::kNormal).ToLocalChecked();
+  return obj->HasRealNamedProperty(local_ctx, key_val).FromMaybe(false);
+}
+
+int ObjectHasRealIndexedProperty(ValuePtr ptr, uint32_t idx) {
+  LOCAL_OBJECT(ptr);
+  return obj->HasRealIndexedProperty(local_ctx, idx).FromMaybe(false);
 }
 
 int ObjectDelete(ValuePtr ptr, const char* key) {

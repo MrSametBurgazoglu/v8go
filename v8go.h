@@ -549,6 +549,27 @@ extern void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
                                                     int enumerator_ref,
                                                     int flags);
 
+// ObjectTemplateSetPropertyInterceptor installs a named (|indexed| == 0) or
+// indexed interceptor with any subset of V8's seven operations; each ref is a
+// Go callback ref, or -1 for an operation left to V8. The getter, query and
+// descriptor answer undefined to mean "not mine"; the setter, deleter and
+// definer answer a boolean (false: the operation failed) or undefined; the
+// enumerator answers an array. See ObjectTemplate.SetPropertyInterceptor.
+extern void ObjectTemplateSetPropertyInterceptor(TemplatePtr ptr,
+                                                 int indexed,
+                                                 int getter_ref,
+                                                 int setter_ref,
+                                                 int query_ref,
+                                                 int deleter_ref,
+                                                 int enumerator_ref,
+                                                 int definer_ref,
+                                                 int descriptor_ref,
+                                                 int flags);
+
+// ObjectTemplateSetImmutableProto makes instances immutable prototype exotic
+// objects: [[SetPrototypeOf]] to anything but the current prototype fails.
+extern void ObjectTemplateSetImmutableProto(TemplatePtr ptr);
+
 // ObjectTemplateSetCrossOriginHandler makes a global template's proxy answer
 // a cross-origin access through the accessing context's cross-origin hook
 // (ContextSetCrossOriginHook) instead of refusing it. See

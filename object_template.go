@@ -173,6 +173,89 @@ const (
 	HandlerHasNoSideEffect PropertyHandlerFlags = 1 << 2
 )
 
+// PropertyInterceptor is the full set of operations a named or indexed
+// interceptor can take over. WebIDL's legacy platform objects need more than a
+// getter: a collection's index has a property descriptor
+// (Object.getOwnPropertyDescriptor(form, 0)), a named property object refuses
+// [[DefineOwnProperty]] and [[Delete]], a <select> has an indexed setter, and
+// HTMLFormElement's [LegacyOverrideBuiltIns] named properties fail an expando
+// that would shadow them.
+//
+// Every callback runs with the holder — the object that carries the
+// interceptor — as `this`, and the key as its first argument: a string or a
+// symbol for a named interceptor, a number for an indexed one. A nil callback
+// leaves that operation to V8.
+//
+//   - Getter(key): the value, or nil/undefined for "not mine" — V8 then looks
+//     at the object's own properties and its prototype chain.
+//   - Setter(key, value): nil/undefined for "not mine", or a boolean: true
+//     when the set was handled, false when it failed. A failure throws a
+//     TypeError in strict code and is silent in sloppy code, as [[Set]]
+//     returning false is. V8 asks it only when the holder is the receiver.
+//   - Query(key): nil/undefined, or the property's attributes as a number
+//     (PropertyAttribute bits). V8 uses it, or Descriptor, for
+//     [[GetOwnProperty]] and for `in`; set at most one of the two.
+//   - Deleter(key): nil/undefined, or a boolean as for Setter.
+//   - Enumerator(): an array of the keys, for Object.keys, for..in and
+//     Reflect.ownKeys.
+//   - Definer(key, descriptor): nil/undefined, or a boolean as for Setter. The
+//     descriptor is the object Object.getOwnPropertyDescriptor would give,
+//     holding only the fields the definition carried.
+//   - Descriptor(key): nil/undefined, or a property descriptor object.
+//
+// A callback that throws (Isolate.ThrowException) makes the operation throw.
+type PropertyInterceptor struct {
+	Getter     FunctionCallback
+	Setter     FunctionCallback
+	Query      FunctionCallback
+	Deleter    FunctionCallback
+	Enumerator FunctionCallback
+	Definer    FunctionCallback
+	Descriptor FunctionCallback
+	Flags      PropertyHandlerFlags
+}
+
+// SetNamedPropertyInterceptor installs h for string- and symbol-keyed
+// properties (strings only with HandlerOnlyInterceptStrings). An array index
+// is not a name to V8: it reaches the indexed interceptor instead.
+func (o *ObjectTemplate) SetNamedPropertyInterceptor(h PropertyInterceptor) {
+	o.setPropertyInterceptor(0, h)
+}
+
+// SetIndexedPropertyInterceptor installs h for array-index keys (0 to
+// 2**32 - 2).
+func (o *ObjectTemplate) SetIndexedPropertyInterceptor(h PropertyInterceptor) {
+	o.setPropertyInterceptor(1, h)
+}
+
+func (o *ObjectTemplate) setPropertyInterceptor(indexed int, h PropertyInterceptor) {
+	ref := func(cb FunctionCallback) C.int {
+		if cb == nil {
+			return -1
+		}
+		r := o.iso.registerCallback(cb)
+		o.cbrefs = append(o.cbrefs, r)
+		return C.int(r)
+	}
+	C.ObjectTemplateSetPropertyInterceptor(o.ptr, C.int(indexed),
+		ref(h.Getter), ref(h.Setter), ref(h.Query), ref(h.Deleter),
+		ref(h.Enumerator), ref(h.Definer), ref(h.Descriptor), C.int(h.Flags))
+	runtime.KeepAlive(o)
+}
+
+// SetImmutableProto makes the template's instances immutable prototype exotic
+// objects (ECMA-262 10.4.7): setting the prototype to anything other than the
+// current one fails — Object.setPrototypeOf throws a TypeError and
+// Reflect.setPrototypeOf answers false. WebIDL asks it of every [Global]
+// object and of the window's named properties object.
+//
+// The prototype is fixed when the instance is made: give it by instantiating
+// through a FunctionTemplate whose function's "prototype" is set first.
+func (o *ObjectTemplate) SetImmutableProto() {
+	C.ObjectTemplateSetImmutableProto(o.ptr)
+	runtime.KeepAlive(o)
+}
+
 // SetNamedPropertyHandler intercepts property reads by name.
 //
 // The DOM is full of objects whose property names are not known in advance:
@@ -184,40 +267,28 @@ const (
 // getter is called with the name as its only argument and the object as `this`;
 // returning nil or undefined means "not mine", and V8 continues the lookup
 // through the object's own properties and its prototype chain. enumerator may
-// be nil; when given it returns an array of names for Object.keys and for..in.
+// be nil; when given it is called with no arguments and returns an array of
+// names for Object.keys and for..in.
 //
 // Mind the flags: with HandlerNone the interceptor is consulted BEFORE the
 // object's own properties, which is right for [LegacyOverrideBuiltIns] and
-// wrong for everything else. See PropertyHandlerFlags.
+// wrong for everything else. See PropertyHandlerFlags. SetNamedPropertyInterceptor
+// takes the other operations too.
 func (o *ObjectTemplate) SetNamedPropertyHandler(getter, enumerator FunctionCallback, flags PropertyHandlerFlags) {
-	getterRef := C.int(-1)
-	if getter != nil {
-		ref := o.iso.registerCallback(getter)
-		o.cbrefs = append(o.cbrefs, ref)
-		getterRef = C.int(ref)
+	if getter == nil {
+		return
 	}
-	enumeratorRef := C.int(-1)
-	if enumerator != nil {
-		ref := o.iso.registerCallback(enumerator)
-		o.cbrefs = append(o.cbrefs, ref)
-		enumeratorRef = C.int(ref)
-	}
-	C.ObjectTemplateSetNamedPropertyHandler(o.ptr, getterRef, -1, -1, -1, enumeratorRef, C.int(flags))
-	runtime.KeepAlive(o)
+	o.SetNamedPropertyInterceptor(PropertyInterceptor{Getter: getter, Enumerator: enumerator, Flags: flags})
 }
 
 // SetIndexedPropertyHandler intercepts property reads by index, which is what
 // makes collection[3] answer without every index being defined in advance.
 //
 // getter is called with the index as a number. Returning nil or undefined
-// means "not mine".
+// means "not mine". SetIndexedPropertyInterceptor takes the other operations.
 func (o *ObjectTemplate) SetIndexedPropertyHandler(getter FunctionCallback, flags PropertyHandlerFlags) {
-	getterRef := C.int(-1)
-	if getter != nil {
-		ref := o.iso.registerCallback(getter)
-		o.cbrefs = append(o.cbrefs, ref)
-		getterRef = C.int(ref)
+	if getter == nil {
+		return
 	}
-	C.ObjectTemplateSetIndexedPropertyHandler(o.ptr, getterRef, -1, -1, -1, -1, C.int(flags))
-	runtime.KeepAlive(o)
+	o.SetIndexedPropertyInterceptor(PropertyInterceptor{Getter: getter, Flags: flags})
 }

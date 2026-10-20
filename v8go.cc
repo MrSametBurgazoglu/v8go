@@ -1258,8 +1258,8 @@ RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso,
   // CORS: the message of anything it throws says so (Message::IsOpaque), and
   // the embedder mutes what it reports. Not shared cross-origin either, as
   // Blink compiles such a script.
-  ScriptOrigin script_origin(ogn, 0, 0, false, -1, Local<Value>(),
-                             opts.opaque != 0);
+  ScriptOrigin script_origin(ogn, opts.lineOffset, opts.columnOffset, false,
+                             -1, Local<Value>(), opts.opaque != 0);
 
   ScriptCompiler::Source source(src, script_origin, cached_data);
 
@@ -3048,6 +3048,15 @@ RtnValue RunScript(ContextPtr ctx,
                    const char* source,
                    int source_len,
                    const char* origin) {
+  return RunScriptAt(ctx, source, source_len, origin, 0, 0);
+}
+
+RtnValue RunScriptAt(ContextPtr ctx,
+                     const char* source,
+                     int source_len,
+                     const char* origin,
+                     int line_offset,
+                     int column_offset) {
   LOCAL_CONTEXT(ctx);
 
   RtnValue rtn = {};
@@ -3064,7 +3073,7 @@ RtnValue RunScript(ContextPtr ctx,
     return rtn;
   }
 
-  ScriptOrigin script_origin(ogn);
+  ScriptOrigin script_origin(ogn, line_offset, column_offset);
   Local<Script> script;
   if (!Script::Compile(local_ctx, src, &script_origin).ToLocal(&script)) {
     rtn.error = ExceptionError(try_catch, iso, local_ctx);

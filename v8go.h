@@ -91,6 +91,11 @@ typedef struct {
   // opaque compiles the script with ScriptOrigin is_opaque=true (and
   // is_shared_cross_origin=false): a script whose errors the embedder mutes.
   int opaque;
+  // lineOffset and columnOffset place the script in its resource
+  // (ScriptOrigin's resource_line_offset and resource_column_offset): an
+  // inline script's first line is the document's line it starts on.
+  int lineOffset;
+  int columnOffset;
 } CompileOptions;
 
 typedef struct {
@@ -273,6 +278,14 @@ extern RtnValue RunScript(ContextPtr ctx_ptr,
                           const char* source,
                           int source_len,
                           const char* origin);
+// RunScriptAt is RunScript with the script's line and column offsets in its
+// resource (ScriptOrigin's resource_line_offset/resource_column_offset).
+extern RtnValue RunScriptAt(ContextPtr ctx_ptr,
+                            const char* source,
+                            int source_len,
+                            const char* origin,
+                            int line_offset,
+                            int column_offset);
 extern RtnValue JSONParse(ContextPtr ctx_ptr, const char* str);
 const char* JSONStringify(ContextPtr ctx_ptr, ValuePtr val_ptr);
 extern ValuePtr ContextGlobal(ContextPtr ctx_ptr);

@@ -168,6 +168,21 @@ func (c *Context) RunScript(source string, origin string) (*Value, error) {
 	return valueResult(c, rtn)
 }
 
+// RunScriptAt is RunScript for a script that does not start at the top of
+// its resource: an inline <script> in a document. lineOffset and
+// columnOffset (from zero; the column applies to the first line) place it,
+// so the line and column an error or a stack frame reports are the
+// resource's, not the script's own.
+func (c *Context) RunScriptAt(source, origin string, lineOffset, columnOffset int) (*Value, error) {
+	cSource := C.CString(source)
+	cOrigin := C.CString(origin)
+	defer C.free(unsafe.Pointer(cSource))
+	defer C.free(unsafe.Pointer(cOrigin))
+
+	rtn := C.RunScriptAt(c.ptr, cSource, C.int(len(source)), cOrigin, C.int(lineOffset), C.int(columnOffset))
+	return valueResult(c, rtn)
+}
+
 // TakeException returns the value thrown by the most recent JavaScript
 // exception that came back to Go as a JSError on this context's isolate, and
 // forgets it; nil when it was already taken or has been collected. Call it

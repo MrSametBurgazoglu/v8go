@@ -36,6 +36,13 @@ type Isolate struct {
 
 	null      *Value
 	undefined *Value
+
+	// log is the recording or replay in progress (snapshot.go);
+	// snapshotTemplates the templates of the snapshot this isolate was made
+	// from; creator marks a SnapshotCreator's isolate.
+	log               *templateLog
+	snapshotTemplates []*template
+	creator           bool
 }
 
 // PromiseRejectEvent mirrors the v8::PromiseRejectEvent enum

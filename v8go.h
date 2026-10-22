@@ -60,6 +60,8 @@ typedef m_ctx* ContextPtr;
 typedef m_value* ValuePtr;
 typedef m_template* TemplatePtr;
 typedef m_unboundScript* UnboundScriptPtr;
+typedef struct m_scriptStream m_scriptStream;
+typedef m_scriptStream* ScriptStreamPtr;
 typedef m_inspector* InspectorPtr;
 typedef m_inspectorSession* InspectorSessionPtr;
 
@@ -223,6 +225,27 @@ extern RtnError IsolateCheckModuleSyntax(IsolatePtr iso_ptr,
                                          const char* s,
                                          int s_len,
                                          const char* o);
+// Script streaming: a classic script parsed and compiled off the isolate's
+// thread. Start on the isolate's thread, Run on any other, Compile back on
+// the isolate's thread with the same source, then Free.
+extern ScriptStreamPtr IsolateStartScriptStream(IsolatePtr iso_ptr,
+                                                const char* s,
+                                                int s_len);
+extern void ScriptStreamRun(ScriptStreamPtr stream);
+// An incremental stream: its source is pushed in chunks, from any thread,
+// while Run parses on its own; Finish says no more is coming.
+extern ScriptStreamPtr IsolateStartIncrementalScriptStream(IsolatePtr iso_ptr);
+extern void ScriptStreamPush(ScriptStreamPtr stream, const char* s, int s_len);
+extern void ScriptStreamFinish(ScriptStreamPtr stream);
+extern RtnUnboundScript ScriptStreamCompile(IsolatePtr iso_ptr,
+                                            ScriptStreamPtr stream,
+                                            const char* s,
+                                            int s_len,
+                                            const char* o,
+                                            int opaque,
+                                            int line_offset,
+                                            int column_offset);
+extern void ScriptStreamFree(ScriptStreamPtr stream);
 extern RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso_ptr,
                                                     const char* source,
                                                     int source_len,
@@ -772,6 +795,18 @@ extern void InspectorSessionDispatch(InspectorSessionPtr session,
 extern void InspectorSessionDispose(InspectorSessionPtr session);
 // PumpPlatformTasks drains the platform foreground task queue for iso.
 extern void PumpPlatformTasks(IsolatePtr iso);
+
+
+extern IsolatePtr NewSnapshotCreatorIsolate();
+extern int SnapshotCreatorAddTemplate(IsolatePtr iso, TemplatePtr tmpl);
+extern int SnapshotCreatorAddContext(IsolatePtr iso, ContextPtr ctx);
+extern char* SnapshotCreatorCreateBlob(IsolatePtr iso, int* size);
+extern IsolatePtr NewIsolateFromSnapshot(const char* data, int size);
+extern TemplatePtr IsolateSnapshotTemplate(IsolatePtr iso, int index, int function);
+extern ContextPtr NewContextFromSnapshot(IsolatePtr iso,
+                                         int index,
+                                         int ref,
+                                         int adopt_from);
 
 #ifdef __cplusplus
 }  // extern "C"

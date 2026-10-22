@@ -216,15 +216,10 @@ func NewFastFunctionTemplate(iso *Isolate, spec string, callback FastCallback) *
 			panic("v8go: a fast spec letter is 'v' or 's'")
 		}
 	}
-	cbref := iso.registerFastCallback(callback)
+	cbref := iso.registerFast(callback)
 	cspec := C.CString(spec)
 	defer C.free(unsafe.Pointer(cspec))
-	tmpl := &template{
-		ptr:   C.NewFastFunctionTemplate(iso.ptr, C.int(cbref), cspec),
-		iso:   iso,
-		cbref: cbref,
-	}
-	runtime.SetFinalizer(tmpl, (*template).finalizer)
+	tmpl := iso.newTemplate(func() C.TemplatePtr { return C.NewFastFunctionTemplate(iso.ptr, C.int(cbref), cspec) }, cbref, true)
 	return &FunctionTemplate{tmpl}
 }
 
@@ -234,7 +229,7 @@ func goFastCallback(ctxref C.int, cbref C.int, field0 C.int64_t, argc C.int, arg
 	if ctx == nil {
 		return
 	}
-	cb := ctx.iso.getFastCallback(int(cbref))
+	cb := lookupFastCallback(ctx, int(cbref))
 	if cb == nil {
 		return
 	}

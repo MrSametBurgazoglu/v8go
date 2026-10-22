@@ -84,14 +84,8 @@ func NewFunctionTemplate(iso *Isolate, callback FunctionCallback) *FunctionTempl
 		panic("nil FunctionCallback argument not supported")
 	}
 
-	cbref := iso.registerCallback(callback)
-
-	tmpl := &template{
-		ptr:   C.NewFunctionTemplate(iso.ptr, C.int(cbref)),
-		iso:   iso,
-		cbref: cbref,
-	}
-	runtime.SetFinalizer(tmpl, (*template).finalizer)
+	cbref := iso.registerFunction(callback)
+	tmpl := iso.newTemplate(func() C.TemplatePtr { return C.NewFunctionTemplate(iso.ptr, C.int(cbref)) }, cbref, true)
 	return &FunctionTemplate{tmpl}
 }
 
@@ -111,6 +105,9 @@ func (tmpl *FunctionTemplate) GetFunction(ctx *Context) *Function {
 // string, boolean, ...), not a runtime JS object; for method-style callbacks
 // use PrototypeMethod.
 func (tmpl *FunctionTemplate) PrototypeSet(name string, val *Value) {
+	if tmpl.replayed {
+		return
+	}
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
 	C.FunctionTemplatePrototypeSetValue(tmpl.ptr, cname, val.ptr, 0)
@@ -127,16 +124,13 @@ func (tmpl *FunctionTemplate) PrototypeMethod(name string, cb FunctionCallback) 
 	if cb == nil {
 		panic("nil FunctionCallback argument not supported")
 	}
-	cbref := tmpl.iso.registerCallback(cb)
+	cbref := tmpl.iso.registerFunction(cb)
 
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
-	child := &template{
-		ptr:   C.FunctionTemplatePrototypeSetMethod(tmpl.ptr, cname, C.int(cbref)),
-		iso:   tmpl.iso,
-		cbref: cbref,
-	}
-	runtime.SetFinalizer(child, (*template).finalizer)
+	child := tmpl.iso.newTemplate(func() C.TemplatePtr {
+		return C.FunctionTemplatePrototypeSetMethod(tmpl.ptr, cname, C.int(cbref))
+	}, cbref, true)
 	return &FunctionTemplate{child}
 }
 
@@ -179,7 +173,7 @@ func goFunctionCallback(ctxref int, cbref int, thisAndArgs *C.ValuePtr, argsCoun
 		info.args[i] = val
 	}
 
-	callbackFunc := ctx.iso.getCallback(cbref)
+	callbackFunc := lookupFunctionCallback(ctx, cbref)
 	if callbackFunc == nil {
 		// The template was released after this function was made — a
 		// function kept past its context's life. Undefined, not a crash.
@@ -195,6 +189,9 @@ func goFunctionCallback(ctxref int, cbref int, thisAndArgs *C.ValuePtr, argsCoun
 // generated interface's prototype chain matches the specification's hierarchy:
 // HTMLDivElement -> HTMLElement -> Element -> Node -> EventTarget.
 func (tmpl *FunctionTemplate) Inherit(parent *FunctionTemplate) {
+	if tmpl.replayed {
+		return
+	}
 	C.FunctionTemplateInherit(tmpl.ptr, parent.ptr)
 	runtime.KeepAlive(tmpl)
 	runtime.KeepAlive(parent)
@@ -213,14 +210,25 @@ func (tmpl *FunctionTemplate) PrototypeTemplate() *ObjectTemplate {
 }
 
 func (tmpl *FunctionTemplate) childTemplate(ptr C.TemplatePtr) *ObjectTemplate {
-	child := &ObjectTemplate{&template{ptr: ptr, iso: tmpl.iso}}
+	child := &ObjectTemplate{&template{ptr: ptr, iso: tmpl.iso, replayed: tmpl.replayed}}
 	runtime.KeepAlive(tmpl)
-	runtime.SetFinalizer(child.template, (*template).finalizer)
+	if !tmpl.replayed {
+		if l := tmpl.iso.log; l != nil && !l.replay {
+			// A recording's derived templates are released with the rest
+			// before the blob is cut.
+			l.derived = append(l.derived, child.template)
+		} else {
+			runtime.SetFinalizer(child.template, (*template).finalizer)
+		}
+	}
 	return child
 }
 
 // SetClassName sets what instances report through constructor.name.
 func (tmpl *FunctionTemplate) SetClassName(name string) {
+	if tmpl.replayed {
+		return
+	}
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
 	C.FunctionTemplateSetClassName(tmpl.ptr, cname)
@@ -230,6 +238,9 @@ func (tmpl *FunctionTemplate) SetClassName(name string) {
 // SetLength sets the constructor's `length`, which WebIDL derives from the
 // number of required arguments.
 func (tmpl *FunctionTemplate) SetLength(length int) {
+	if tmpl.replayed {
+		return
+	}
 	C.FunctionTemplateSetLength(tmpl.ptr, C.int(length))
 	runtime.KeepAlive(tmpl)
 }
@@ -237,6 +248,9 @@ func (tmpl *FunctionTemplate) SetLength(length int) {
 // ReadOnlyPrototype makes the constructor's `prototype` non-writable, as an
 // interface object's is.
 func (tmpl *FunctionTemplate) ReadOnlyPrototype() {
+	if tmpl.replayed {
+		return
+	}
 	C.FunctionTemplateReadOnlyPrototype(tmpl.ptr)
 	runtime.KeepAlive(tmpl)
 }

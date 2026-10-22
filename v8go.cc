@@ -8,6 +8,9 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <condition_variable>
+#include <mutex>
 #include <limits>
 #include <mutex>
 #include <iostream>
@@ -1227,6 +1230,182 @@ IsolateHStatistics IsolationGetHeapStatistics(IsolatePtr iso) {
                             hs.number_of_detached_contexts()};
 }
 
+/********** Script streaming **********/
+
+// OneShotSourceStream hands V8 the whole source as one chunk: the embedder
+// streams a script it already holds, so that the parse and compile run on a
+// background thread rather than on the isolate's. V8 takes ownership of the
+// chunk it is given.
+class OneShotSourceStream : public ScriptCompiler::ExternalSourceStream {
+ public:
+  OneShotSourceStream(const char* s, int len)
+      : data_(len > 0 ? new uint8_t[len] : nullptr), len_(len > 0 ? len : 0) {
+    if (data_) {
+      memcpy(data_, s, len_);
+    }
+  }
+  ~OneShotSourceStream() override { delete[] data_; }
+
+  size_t GetMoreData(const uint8_t** src) override {
+    if (!data_) {
+      *src = nullptr;
+      return 0;
+    }
+    *src = data_;
+    size_t n = len_;
+    data_ = nullptr;
+    len_ = 0;
+    return n;
+  }
+
+ private:
+  uint8_t* data_;
+  size_t len_;
+};
+
+// QueueSourceStream is a source pushed in chunks as they arrive, from any
+// thread, while V8 parses on its background thread: GetMoreData waits for
+// the next chunk or the end.
+class QueueSourceStream : public ScriptCompiler::ExternalSourceStream {
+ public:
+  ~QueueSourceStream() override {
+    for (auto& chunk : chunks_) {
+      delete[] chunk.first;
+    }
+  }
+
+  void Push(const char* s, int len) {
+    if (len <= 0) {
+      return;
+    }
+    uint8_t* copy = new uint8_t[len];
+    memcpy(copy, s, len);
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (finished_) {
+        delete[] copy;
+        return;
+      }
+      chunks_.emplace_back(copy, static_cast<size_t>(len));
+    }
+    cv_.notify_one();
+  }
+
+  void Finish() {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      finished_ = true;
+    }
+    cv_.notify_one();
+  }
+
+  size_t GetMoreData(const uint8_t** src) override {
+    std::unique_lock<std::mutex> lock(mu_);
+    cv_.wait(lock, [this] { return !chunks_.empty() || finished_; });
+    if (chunks_.empty()) {
+      *src = nullptr;
+      return 0;
+    }
+    auto chunk = chunks_.front();
+    chunks_.pop_front();
+    *src = chunk.first;
+    return chunk.second;
+  }
+
+ private:
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::deque<std::pair<uint8_t*, size_t>> chunks_;
+  bool finished_ = false;
+};
+
+struct m_scriptStream {
+  std::unique_ptr<ScriptCompiler::StreamedSource> source;
+  std::unique_ptr<ScriptCompiler::ScriptStreamingTask> task;
+  // The pushed source, when there is one; owned by source.
+  QueueSourceStream* queue = nullptr;
+};
+
+ScriptStreamPtr IsolateStartIncrementalScriptStream(IsolatePtr iso) {
+  ISOLATE_SCOPE(iso);
+  m_scriptStream* stream = new m_scriptStream;
+  auto queue = std::make_unique<QueueSourceStream>();
+  stream->queue = queue.get();
+  stream->source.reset(new ScriptCompiler::StreamedSource(
+      std::move(queue), ScriptCompiler::StreamedSource::UTF8));
+  stream->task.reset(
+      ScriptCompiler::StartStreaming(iso, stream->source.get()));
+  return stream;
+}
+
+void ScriptStreamPush(ScriptStreamPtr stream, const char* s, int s_len) {
+  if (stream && stream->queue) {
+    stream->queue->Push(s, s_len);
+  }
+}
+
+void ScriptStreamFinish(ScriptStreamPtr stream) {
+  if (stream && stream->queue) {
+    stream->queue->Finish();
+  }
+}
+
+ScriptStreamPtr IsolateStartScriptStream(IsolatePtr iso,
+                                         const char* s,
+                                         int s_len) {
+  ISOLATE_SCOPE(iso);
+  m_scriptStream* stream = new m_scriptStream;
+  stream->source.reset(new ScriptCompiler::StreamedSource(
+      std::make_unique<OneShotSourceStream>(s, s_len),
+      ScriptCompiler::StreamedSource::UTF8));
+  stream->task.reset(
+      ScriptCompiler::StartStreaming(iso, stream->source.get()));
+  return stream;
+}
+
+void ScriptStreamRun(ScriptStreamPtr stream) {
+  if (stream && stream->task) {
+    stream->task->Run();
+  }
+}
+
+RtnUnboundScript ScriptStreamCompile(IsolatePtr iso,
+                                     ScriptStreamPtr stream,
+                                     const char* s,
+                                     int s_len,
+                                     const char* o,
+                                     int opaque) {
+  ISOLATE_SCOPE_INTERNAL_CONTEXT(iso);
+  TryCatch try_catch(iso);
+  Local<Context> local_ctx = ctx->ptr.Get(iso);
+  Context::Scope context_scope(local_ctx);
+
+  RtnUnboundScript rtn = {};
+  Local<String> src =
+      String::NewFromUtf8(iso, s, NewStringType::kNormal, s_len)
+          .ToLocalChecked();
+  Local<String> ogn =
+      String::NewFromUtf8(iso, o, NewStringType::kNormal).ToLocalChecked();
+  // As IsolateCompileUnboundScript: an opaque script's errors are muted.
+  ScriptOrigin script_origin(ogn, 0, 0, false, -1, Local<Value>(),
+                             opaque != 0);
+  Local<Script> script;
+  if (!ScriptCompiler::Compile(local_ctx, stream->source.get(), src,
+                               script_origin)
+           .ToLocal(&script)) {
+    rtn.error = ExceptionError(try_catch, iso, local_ctx);
+    return rtn;
+  }
+  m_unboundScript* us = new m_unboundScript;
+  us->ptr.Reset(iso, script->GetUnboundScript());
+  rtn.ptr = tracked_unbound_script(ctx, us);
+  return rtn;
+}
+
+void ScriptStreamFree(ScriptStreamPtr stream) {
+  delete stream;
+}
+
 RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso,
                                              const char* s,
                                              int s_len,
@@ -1591,6 +1770,11 @@ void ObjectTemplateSetCallAsFunctionHandler(TemplatePtr ptr, int callback_ref) {
 // chosen outside the int32 range so no real field value collides with it.
 static const int64_t kNoInternalField = -(int64_t(1) << 40);
 
+// kNoCallback is the callback reference that means "none". Not -1: a
+// negative reference is a callback table's (snapshot.go), and -1 is its
+// first entry. Must match noCallback in snapshot.go.
+static const int kNoCallback = std::numeric_limits<int>::min();
+
 static void FunctionTemplateCallback(const FunctionCallbackInfo<Value>& info) {
   Isolate* iso = info.GetIsolate();
   ISOLATE_SCOPE(iso);
@@ -1914,8 +2098,15 @@ static void FastFunctionTemplateCallback(
   int ctx_ref = ref_val.As<Integer>()->Value();
 
   double data = info.Data().As<Number>()->Value();
-  int callback_ref = static_cast<int>(data / kFastSpecRadix);
-  int spec = static_cast<int>(data - callback_ref * kFastSpecRadix);
+  // A negative reference (a callback table's, see snapshot.go) is encoded
+  // as the negated whole, so the spec bits survive the sign.
+  bool table = data < 0;
+  double whole = table ? -data : data;
+  int callback_ref = static_cast<int>(whole / kFastSpecRadix);
+  int spec = static_cast<int>(whole - callback_ref * kFastSpecRadix);
+  if (table) {
+    callback_ref = -callback_ref;
+  }
 
   int64_t this_field0 = kNoInternalField;
   {
@@ -2012,8 +2203,10 @@ TemplatePtr NewFastFunctionTemplate(IsolatePtr iso,
   Isolate::Scope isolate_scope(iso);
   HandleScope handle_scope(iso);
 
-  Local<Number> cbData = Number::New(
-      iso, callback_ref * kFastSpecRadix + fastSpecBits(spec));
+  double whole = (callback_ref < 0 ? -callback_ref : callback_ref) *
+                     kFastSpecRadix +
+                 fastSpecBits(spec);
+  Local<Number> cbData = Number::New(iso, callback_ref < 0 ? -whole : whole);
   m_template* ot = new m_template;
   ot->iso = iso;
   ot->ptr = new Persistent<Template>(
@@ -2223,12 +2416,12 @@ void TemplateSetAccessorProperty(TemplatePtr ptr,
       String::NewFromUtf8(iso, name, NewStringType::kNormal).ToLocalChecked();
 
   Local<FunctionTemplate> getter;
-  if (getter_ref >= 0) {
+  if (getter_ref != kNoCallback) {
     getter = FunctionTemplate::New(iso, FunctionTemplateCallback,
                                    Integer::New(iso, getter_ref));
   }
   Local<FunctionTemplate> setter;
-  if (setter_ref >= 0) {
+  if (setter_ref != kNoCallback) {
     setter = FunctionTemplate::New(iso, FunctionTemplateCallback,
                                    Integer::New(iso, setter_ref));
   }
@@ -2338,14 +2531,63 @@ int registerInterceptorRefs(const int* refs) {
   return static_cast<int>(interceptor_refs.size() - 1);
 }
 
+// A handler whose callbacks are all a callback table's (snapshot.go) does not
+// use the table above: its Data slot would name an entry of this process's
+// table, which a snapshot taken here and read in another process would not
+// have. Such a handler's callbacks are registered one after another, in
+// operation order, so the slot carries them itself, as a negative integer:
+// -(first << kOpCount | mask), mask having a bit per operation given and
+// first the table index (positive) of the first one. See
+// encodeTableInterceptorRefs.
+int encodeTableInterceptorRefs(const int* refs) {
+  int mask = 0;
+  int first = 0;
+  int next = 0;
+  for (int i = 0; i < kOpCount; i++) {
+    if (refs[i] == kNoCallback) {
+      continue;
+    }
+    if (refs[i] >= 0) {
+      return 0;  // an isolate's ref: the process table it is
+    }
+    int k = -refs[i];
+    if (mask == 0) {
+      first = k;
+    } else if (k != next) {
+      return 0;  // not consecutive
+    }
+    next = k + 1;
+    mask |= 1 << i;
+  }
+  if (mask == 0 || first >= (1 << (30 - kOpCount))) {
+    return 0;
+  }
+  return -((first << kOpCount) | mask);
+}
+
 int interceptorRef(Local<Value> data, InterceptorOp op) {
   if (data.IsEmpty() || !data->IsInt32()) {
-    return -1;
+    return kNoCallback;
   }
   int index = data.As<Int32>()->Value();
+  if (index < 0) {
+    int v = -index;
+    int mask = v & ((1 << kOpCount) - 1);
+    int first = v >> kOpCount;
+    if ((mask & (1 << op)) == 0) {
+      return kNoCallback;
+    }
+    int before = 0;
+    for (int i = 0; i < op; i++) {
+      if (mask & (1 << i)) {
+        before++;
+      }
+    }
+    return -(first + before);
+  }
   std::lock_guard<std::mutex> lock(interceptor_refs_mu);
-  if (index < 0 || static_cast<size_t>(index) >= interceptor_refs.size()) {
-    return -1;
+  if (static_cast<size_t>(index) >= interceptor_refs.size()) {
+    return kNoCallback;
   }
   return interceptor_refs[index].refs[op];
 }
@@ -2362,7 +2604,7 @@ bool interceptorContext(const PropertyCallbackInfo<T>& info,
                         m_ctx** ctx,
                         int* callback_ref) {
   *callback_ref = interceptorRef(info.Data(), op);
-  if (*callback_ref < 0) {
+  if (*callback_ref == kNoCallback) {
     return false;
   }
   Isolate* iso = info.GetIsolate();
@@ -2662,32 +2904,34 @@ void ObjectTemplateSetPropertyInterceptor(TemplatePtr ptr,
   Local<ObjectTemplate> obj_tmpl = tmpl.As<ObjectTemplate>();
   int refs[kOpCount] = {getter_ref,     setter_ref,  query_ref,     deleter_ref,
                         enumerator_ref, definer_ref, descriptor_ref};
-  Local<Value> data = Integer::New(iso, registerInterceptorRefs(refs));
+  int encoded = encodeTableInterceptorRefs(refs);
+  Local<Value> data = Integer::New(
+      iso, encoded < 0 ? encoded : registerInterceptorRefs(refs));
   // V8 asks query OR descriptor, never both: a handler with a descriptor
   // callback answers [[GetOwnProperty]] through it, and one with a query
   // callback through the attributes. Passing only the ones given keeps the
   // other path V8's own.
   if (indexed) {
     IndexedPropertyHandlerConfiguration config(
-        getter_ref >= 0 ? indexedGetter : nullptr,
-        setter_ref >= 0 ? indexedSetter : nullptr,
-        query_ref >= 0 ? indexedQuery : nullptr,
-        deleter_ref >= 0 ? indexedDeleter : nullptr,
-        enumerator_ref >= 0 ? enumerator : nullptr,
-        definer_ref >= 0 ? indexedDefiner : nullptr,
-        descriptor_ref >= 0 ? indexedDescriptor : nullptr, data,
+        getter_ref != kNoCallback ? indexedGetter : nullptr,
+        setter_ref != kNoCallback ? indexedSetter : nullptr,
+        query_ref != kNoCallback ? indexedQuery : nullptr,
+        deleter_ref != kNoCallback ? indexedDeleter : nullptr,
+        enumerator_ref != kNoCallback ? enumerator : nullptr,
+        definer_ref != kNoCallback ? indexedDefiner : nullptr,
+        descriptor_ref != kNoCallback ? indexedDescriptor : nullptr, data,
         handlerFlags(flags));
     obj_tmpl->SetHandler(config);
     return;
   }
   NamedPropertyHandlerConfiguration config(
-      getter_ref >= 0 ? namedGetter : nullptr,
-      setter_ref >= 0 ? namedSetter : nullptr,
-      query_ref >= 0 ? namedQuery : nullptr,
-      deleter_ref >= 0 ? namedDeleter : nullptr,
-      enumerator_ref >= 0 ? enumerator : nullptr,
-      definer_ref >= 0 ? namedDefiner : nullptr,
-      descriptor_ref >= 0 ? namedDescriptor : nullptr, data,
+      getter_ref != kNoCallback ? namedGetter : nullptr,
+      setter_ref != kNoCallback ? namedSetter : nullptr,
+      query_ref != kNoCallback ? namedQuery : nullptr,
+      deleter_ref != kNoCallback ? namedDeleter : nullptr,
+      enumerator_ref != kNoCallback ? enumerator : nullptr,
+      definer_ref != kNoCallback ? namedDefiner : nullptr,
+      descriptor_ref != kNoCallback ? namedDescriptor : nullptr, data,
       handlerFlags(flags));
   obj_tmpl->SetHandler(config);
 }
@@ -2699,12 +2943,12 @@ void ObjectTemplateSetNamedPropertyHandler(TemplatePtr ptr,
                                            int deleter_ref,
                                            int enumerator_ref,
                                            int flags) {
-  if (getter_ref < 0) {
+  if (getter_ref == kNoCallback) {
     return;
   }
   ObjectTemplateSetPropertyInterceptor(ptr, 0, getter_ref, setter_ref,
                                        query_ref, deleter_ref, enumerator_ref,
-                                       -1, -1, flags);
+                                       kNoCallback, kNoCallback, flags);
 }
 
 void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
@@ -2714,12 +2958,12 @@ void ObjectTemplateSetIndexedPropertyHandler(TemplatePtr ptr,
                                              int deleter_ref,
                                              int enumerator_ref,
                                              int flags) {
-  if (getter_ref < 0) {
+  if (getter_ref == kNoCallback) {
     return;
   }
   ObjectTemplateSetPropertyInterceptor(ptr, 1, getter_ref, setter_ref,
                                        query_ref, deleter_ref, enumerator_ref,
-                                       -1, -1, flags);
+                                       kNoCallback, kNoCallback, flags);
 }
 
 void ObjectTemplateSetImmutableProto(TemplatePtr ptr) {
@@ -5226,3 +5470,246 @@ void InspectorSessionDispose(InspectorSessionPtr s) {
 }
 
 }  // extern "C"
+
+/********** Startup snapshots **********/
+
+// Every native function a snapshotted template can point at. V8 serialises a
+// function pointer as its index in this list, so the list is the same for the
+// creator and for every isolate made from its blob, and it is terminated by
+// a zero.
+static intptr_t* snapshotExternalReferences() {
+  static intptr_t refs[] = {
+      reinterpret_cast<intptr_t>(FunctionTemplateCallback),
+      reinterpret_cast<intptr_t>(FastFunctionTemplateCallback),
+      // Property interceptors (ObjectTemplateSetPropertyInterceptor).
+      reinterpret_cast<intptr_t>(namedGetter),
+      reinterpret_cast<intptr_t>(indexedGetter),
+      reinterpret_cast<intptr_t>(namedSetter),
+      reinterpret_cast<intptr_t>(indexedSetter),
+      reinterpret_cast<intptr_t>(namedQuery),
+      reinterpret_cast<intptr_t>(indexedQuery),
+      reinterpret_cast<intptr_t>(namedDeleter),
+      reinterpret_cast<intptr_t>(indexedDeleter),
+      reinterpret_cast<intptr_t>(namedDefiner),
+      reinterpret_cast<intptr_t>(indexedDefiner),
+      reinterpret_cast<intptr_t>(namedDescriptor),
+      reinterpret_cast<intptr_t>(indexedDescriptor),
+      reinterpret_cast<intptr_t>(enumerator),
+      // The cross-origin access check (ObjectTemplateSetCrossOriginHandler).
+      reinterpret_cast<intptr_t>(denyCrossOriginAccess),
+      reinterpret_cast<intptr_t>(xoNamedGetter),
+      reinterpret_cast<intptr_t>(xoNamedSetter),
+      reinterpret_cast<intptr_t>(xoNamedQuery),
+      reinterpret_cast<intptr_t>(xoNamedDeleter),
+      reinterpret_cast<intptr_t>(xoNamedDefiner),
+      reinterpret_cast<intptr_t>(xoNamedDescriptor),
+      reinterpret_cast<intptr_t>(xoKeys),
+      reinterpret_cast<intptr_t>(xoIndexedGetter),
+      reinterpret_cast<intptr_t>(xoIndexedSetter),
+      reinterpret_cast<intptr_t>(xoIndexedQuery),
+      reinterpret_cast<intptr_t>(xoIndexedDeleter),
+      reinterpret_cast<intptr_t>(xoIndexedDefiner),
+      reinterpret_cast<intptr_t>(xoIndexedDescriptor),
+      // Functions made in a context, which a snapshotted context can hold.
+      reinterpret_cast<intptr_t>(MintPrivateSymbol),
+      reinterpret_cast<intptr_t>(importMetaResolve),
+      0};
+  return refs;
+}
+
+// An internal field v8go writes holds a small integer (an embedder's key for
+// the native object behind a wrapper), which V8's serialiser cannot tell
+// from an aligned pointer and so hands here. It is carried as its four
+// bytes and written back on deserialisation; anything else is left to V8.
+static StartupData serializeInternalField(Local<Object> holder,
+                                          int index,
+                                          void* data) {
+  Local<Data> field = holder->GetInternalField(index);
+  if (!field.IsEmpty() && field->IsValue() && field.As<Value>()->IsInt32()) {
+    int32_t v = field.As<Value>().As<Int32>()->Value();
+    char* bytes = new char[sizeof(v)];
+    memcpy(bytes, &v, sizeof(v));
+    return StartupData{bytes, static_cast<int>(sizeof(v))};
+  }
+  return StartupData{nullptr, 0};
+}
+
+static void deserializeInternalField(Local<Object> holder,
+                                     int index,
+                                     StartupData payload,
+                                     void* data) {
+  if (payload.raw_size != sizeof(int32_t)) {
+    return;
+  }
+  int32_t v;
+  memcpy(&v, payload.data, sizeof(v));
+  holder->SetInternalField(index, Integer::New(Isolate::GetCurrent(), v));
+}
+
+// The context's embedder data is v8go's own reference, rewritten when the
+// context is deserialised; nothing of it is carried.
+static StartupData serializeContextData(Local<Context> holder,
+                                        int index,
+                                        void* data) {
+  return StartupData{nullptr, 0};
+}
+
+static std::unordered_map<Isolate*, SnapshotCreator*>& snapshotCreators() {
+  static std::unordered_map<Isolate*, SnapshotCreator*> creators;
+  return creators;
+}
+
+IsolatePtr NewSnapshotCreatorIsolate() {
+  Isolate::CreateParams params;
+  params.array_buffer_allocator = default_allocator;
+  params.external_references = snapshotExternalReferences();
+  SnapshotCreator* creator = new SnapshotCreator(params);
+  Isolate* iso = creator->GetIsolate();
+  snapshotCreators()[iso] = creator;
+  finishIsolateInit(iso);
+  return iso;
+}
+
+int SnapshotCreatorAddTemplate(IsolatePtr iso, TemplatePtr tmpl) {
+  auto it = snapshotCreators().find(iso);
+  if (it == snapshotCreators().end() || tmpl == nullptr) {
+    return -1;
+  }
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  return static_cast<int>(it->second->AddData(tmpl->ptr->Get(iso)));
+}
+
+int SnapshotCreatorAddContext(IsolatePtr iso, ContextPtr ctx) {
+  auto it = snapshotCreators().find(iso);
+  if (it == snapshotCreators().end() || ctx == nullptr) {
+    return -1;
+  }
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  return static_cast<int>(it->second->AddContext(
+      ctx->ptr.Get(iso), SerializeInternalFieldsCallback(serializeInternalField),
+      SerializeContextDataCallback(serializeContextData)));
+}
+
+// SnapshotCreatorCreateBlob cuts the blob and disposes of the creator and its
+// isolate. The caller has released every handle it holds; the isolate's own
+// internal context and any parked global proxy of this isolate go here. The
+// bytes are malloc'd and the caller frees them.
+char* SnapshotCreatorCreateBlob(IsolatePtr iso, int* size) {
+  auto it = snapshotCreators().find(iso);
+  if (it == snapshotCreators().end()) {
+    return nullptr;
+  }
+  SnapshotCreator* creator = it->second;
+  snapshotCreators().erase(it);
+  StartupData blob;
+  {
+    Locker locker(iso);
+    Isolate::Scope isolate_scope(iso);
+    {
+      HandleScope handle_scope(iso);
+      m_ctx* internal = isolateInternalContext(iso);
+      iso->SetData(0, nullptr);
+      ContextFree(internal);
+      auto& kept = keptGlobals();
+      for (auto k = kept.begin(); k != kept.end();) {
+        k->second.Reset();
+        k = kept.erase(k);
+      }
+      // V8 wants a default context; an empty one keeps Context::New on the
+      // snapshot's isolates what it always was.
+      creator->SetDefaultContext(Context::New(iso));
+    }
+    blob = creator->CreateBlob(SnapshotCreator::FunctionCodeHandling::kKeep);
+  }
+  delete creator;
+  if (blob.data == nullptr) {
+    return nullptr;
+  }
+  char* out = static_cast<char*>(malloc(blob.raw_size));
+  memcpy(out, blob.data, blob.raw_size);
+  *size = blob.raw_size;
+  delete[] blob.data;
+  return out;
+}
+
+// NewIsolateFromSnapshot makes an isolate over a blob, which it copies and
+// keeps for its life.
+IsolatePtr NewIsolateFromSnapshot(const char* data, int size) {
+  StartupData* blob = new StartupData;
+  char* copy = new char[size];
+  memcpy(copy, data, size);
+  blob->data = copy;
+  blob->raw_size = size;
+  Isolate::CreateParams params;
+  params.array_buffer_allocator = default_allocator;
+  params.snapshot_blob = blob;
+  params.external_references = snapshotExternalReferences();
+  Isolate* iso = Isolate::New(params);
+  finishIsolateInit(iso);
+  return iso;
+}
+
+// IsolateSnapshotTemplate takes template index out of the snapshot. V8 hands
+// each one out once; the caller keeps the handle for the isolate's life.
+TemplatePtr IsolateSnapshotTemplate(IsolatePtr iso, int index, int function) {
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+  Local<Template> tmpl;
+  if (function) {
+    Local<FunctionTemplate> fn;
+    if (!iso->GetDataFromSnapshotOnce<FunctionTemplate>(index).ToLocal(&fn)) {
+      return nullptr;
+    }
+    tmpl = fn;
+  } else {
+    Local<ObjectTemplate> obj;
+    if (!iso->GetDataFromSnapshotOnce<ObjectTemplate>(index).ToLocal(&obj)) {
+      return nullptr;
+    }
+    tmpl = obj;
+  }
+  m_template* ot = new m_template;
+  ot->iso = iso;
+  ot->ptr = new Persistent<Template>(iso, tmpl);
+  return ot;
+}
+
+// NewContextFromSnapshot deserialises context index around the global proxy
+// parked under adopt_from, when there is one.
+ContextPtr NewContextFromSnapshot(IsolatePtr iso,
+                                  int index,
+                                  int ref,
+                                  int adopt_from) {
+  Locker locker(iso);
+  Isolate::Scope isolate_scope(iso);
+  HandleScope handle_scope(iso);
+
+  MaybeLocal<Value> global_object;
+  auto& kept = keptGlobals();
+  auto it = kept.find(adopt_from);
+  if (it != kept.end()) {
+    if (!it->second.IsEmpty()) {
+      global_object = MaybeLocal<Value>(it->second.Get(iso));
+    }
+    it->second.Reset();
+    kept.erase(it);
+  }
+  Local<Context> local_ctx;
+  if (!Context::FromSnapshot(
+           iso, index,
+           DeserializeInternalFieldsCallback(deserializeInternalField),
+           nullptr, global_object)
+           .ToLocal(&local_ctx)) {
+    return nullptr;
+  }
+  local_ctx->SetEmbedderData(1, Integer::New(iso, ref));
+  m_ctx* ctx = new m_ctx;
+  ctx->ptr.Reset(iso, local_ctx);
+  ctx->iso = iso;
+  return ctx;
+}

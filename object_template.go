@@ -50,11 +50,7 @@ func NewObjectTemplate(iso *Isolate) *ObjectTemplate {
 		panic("nil Isolate argument not supported")
 	}
 
-	tmpl := &template{
-		ptr: C.NewObjectTemplate(iso.ptr),
-		iso: iso,
-	}
-	runtime.SetFinalizer(tmpl, (*template).finalizer)
+	tmpl := iso.newTemplate(func() C.TemplatePtr { return C.NewObjectTemplate(iso.ptr) }, 0, false)
 	return &ObjectTemplate{tmpl}
 }
 
@@ -72,6 +68,9 @@ func (o *ObjectTemplate) NewInstance(ctx *Context) (*Object, error) {
 // SetInternalFieldCount sets the number of internal fields that instances of this
 // template will have.
 func (o *ObjectTemplate) SetInternalFieldCount(fieldCount uint32) {
+	if o.replayed {
+		return
+	}
 	C.ObjectTemplateSetInternalFieldCount(o.ptr, C.int(fieldCount))
 }
 
@@ -96,6 +95,9 @@ func (o *ObjectTemplate) InternalFieldCount() uint32 {
 // SetCallAsFunctionHandler, which the one object that needs this wants anyway
 // (`document.all(name)` is the legacy spelling of namedItem).
 func (o *ObjectTemplate) MarkAsUndetectable() {
+	if o.replayed {
+		return
+	}
 	C.ObjectTemplateMarkAsUndetectable(o.ptr)
 	runtime.KeepAlive(o)
 }
@@ -118,6 +120,9 @@ func (o *ObjectTemplate) MarkAsUndetectable() {
 // through the accessing context's hook: an object that is cross-origin to
 // whoever holds it, as HTML's cross-origin Location and Window are.
 func (o *ObjectTemplate) SetCrossOriginHandler() {
+	if o.replayed {
+		return
+	}
 	C.ObjectTemplateSetCrossOriginHandler(o.ptr)
 	runtime.KeepAlive(o)
 }
@@ -127,6 +132,9 @@ func (o *ObjectTemplate) SetCrossOriginHandler() {
 // (Isolate.SetCodeGenerationCheck) with isCodeLike true, instead of returning
 // it unevaluated. Trusted Types' TrustedScript is the object it exists for.
 func (o *ObjectTemplate) SetCodeLike() {
+	if o.replayed {
+		return
+	}
 	C.ObjectTemplateSetCodeLike(o.ptr)
 	runtime.KeepAlive(o)
 }
@@ -137,8 +145,11 @@ func (o *ObjectTemplate) SetCallAsFunctionHandler(callback FunctionCallback) {
 	if callback == nil {
 		panic("nil FunctionCallback argument not supported")
 	}
-	cbref := o.iso.registerCallback(callback)
+	cbref := o.iso.registerFunction(callback)
 	o.cbrefs = append(o.cbrefs, cbref)
+	if o.replayed {
+		return
+	}
 	C.ObjectTemplateSetCallAsFunctionHandler(o.ptr, C.int(cbref))
 	runtime.KeepAlive(o)
 }
@@ -231,15 +242,22 @@ func (o *ObjectTemplate) SetIndexedPropertyInterceptor(h PropertyInterceptor) {
 func (o *ObjectTemplate) setPropertyInterceptor(indexed int, h PropertyInterceptor) {
 	ref := func(cb FunctionCallback) C.int {
 		if cb == nil {
-			return -1
+			return noCallback
 		}
-		r := o.iso.registerCallback(cb)
+		r := o.iso.registerFunction(cb)
 		o.cbrefs = append(o.cbrefs, r)
 		return C.int(r)
 	}
+	// Registered in operation order whether or not the template is a
+	// snapshot's: a replay has to register the same callbacks at the same
+	// table indices as the recording did.
+	getter, setter, query, deleter := ref(h.Getter), ref(h.Setter), ref(h.Query), ref(h.Deleter)
+	enumerator, definer, descriptor := ref(h.Enumerator), ref(h.Definer), ref(h.Descriptor)
+	if o.replayed {
+		return
+	}
 	C.ObjectTemplateSetPropertyInterceptor(o.ptr, C.int(indexed),
-		ref(h.Getter), ref(h.Setter), ref(h.Query), ref(h.Deleter),
-		ref(h.Enumerator), ref(h.Definer), ref(h.Descriptor), C.int(h.Flags))
+		getter, setter, query, deleter, enumerator, definer, descriptor, C.int(h.Flags))
 	runtime.KeepAlive(o)
 }
 
@@ -252,6 +270,9 @@ func (o *ObjectTemplate) setPropertyInterceptor(indexed int, h PropertyIntercept
 // The prototype is fixed when the instance is made: give it by instantiating
 // through a FunctionTemplate whose function's "prototype" is set first.
 func (o *ObjectTemplate) SetImmutableProto() {
+	if o.replayed {
+		return
+	}
 	C.ObjectTemplateSetImmutableProto(o.ptr)
 	runtime.KeepAlive(o)
 }

@@ -31,6 +31,9 @@ type Context struct {
 	ref int
 	ptr C.ContextPtr
 	iso *Isolate
+	// callbacks is the table the context's snapshot templates call into
+	// (snapshot.go); nil for a context that has none.
+	callbacks *CallbackTable
 }
 
 type contextOptions struct {
@@ -95,6 +98,7 @@ func NewContextAdoptingGlobal(iso *Isolate, gTmpl *ObjectTemplate, adoptFrom int
 		ptr: C.NewContextAdoptingGlobal(iso.ptr, gTmpl.ptr, C.int(ref), C.int(adoptFrom)),
 		iso: iso,
 	}
+	ctx.adoptLogTable()
 	ctx.register()
 	runtime.KeepAlive(gTmpl)
 	return ctx
@@ -126,6 +130,7 @@ func NewContext(opt ...ContextOption) *Context {
 		ptr: C.NewContext(opts.iso.ptr, opts.gTmpl.ptr, C.int(ref)),
 		iso: opts.iso,
 	}
+	ctx.adoptLogTable()
 	ctx.register()
 	runtime.KeepAlive(opts.gTmpl)
 	return ctx

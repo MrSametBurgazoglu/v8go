@@ -1374,7 +1374,9 @@ RtnUnboundScript ScriptStreamCompile(IsolatePtr iso,
                                      const char* s,
                                      int s_len,
                                      const char* o,
-                                     int opaque) {
+                                     int opaque,
+                                     int line_offset,
+                                     int column_offset) {
   ISOLATE_SCOPE_INTERNAL_CONTEXT(iso);
   TryCatch try_catch(iso);
   Local<Context> local_ctx = ctx->ptr.Get(iso);
@@ -1386,9 +1388,10 @@ RtnUnboundScript ScriptStreamCompile(IsolatePtr iso,
           .ToLocalChecked();
   Local<String> ogn =
       String::NewFromUtf8(iso, o, NewStringType::kNormal).ToLocalChecked();
-  // As IsolateCompileUnboundScript: an opaque script's errors are muted.
-  ScriptOrigin script_origin(ogn, 0, 0, false, -1, Local<Value>(),
-                             opaque != 0);
+  // As IsolateCompileUnboundScript: an opaque script's errors are muted,
+  // and the offsets place the script in its resource.
+  ScriptOrigin script_origin(ogn, line_offset, column_offset, false, -1,
+                             Local<Value>(), opaque != 0);
   Local<Script> script;
   if (!ScriptCompiler::Compile(local_ctx, stream->source.get(), src,
                                script_origin)

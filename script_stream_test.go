@@ -95,3 +95,28 @@ func TestIncrementalScriptStreamCanBeAbandonedUnfinished(t *testing.T) {
 	stream.Push([]byte("var half = "))
 	stream.Close()
 }
+
+// A streamed script placed in its resource reports the resource's lines, as
+// a compile with the same offsets does.
+func TestScriptStreamKeepsLineOffsets(t *testing.T) {
+	iso := v8.NewIsolate()
+	defer iso.Dispose()
+	ctx := v8.NewContext(iso)
+	defer ctx.Close()
+	source := "\n\nnew Error('x').stack"
+	stream := iso.StartScriptStream(source)
+	script, err := stream.Compile(source, "page.html", v8.CompileOptions{LineOffset: 40, ColumnOffset: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	val, err := script.Run(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := val.String(); !strings.Contains(got, "page.html:43:") {
+		t.Fatalf("streamed stack %q, want line 43 of page.html", got)
+	}
+	if _, err := stream.Compile(source, "page.html", v8.CompileOptions{}); err == nil {
+		t.Fatal("a spent stream compiled again")
+	}
+}

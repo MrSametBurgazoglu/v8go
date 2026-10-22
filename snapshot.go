@@ -318,6 +318,11 @@ func NewSnapshotCreator() *SnapshotCreator {
 	return &SnapshotCreator{iso: iso}
 }
 
+// IsSnapshotCreator says the isolate is a SnapshotCreator's: one that keeps
+// no code cache (V8 cuts none on it) and must release every handle before
+// its blob is cut.
+func (i *Isolate) IsSnapshotCreator() bool { return i != nil && i.creator }
+
 // Isolate is the creator's isolate.
 func (s *SnapshotCreator) Isolate() *Isolate { return s.iso }
 

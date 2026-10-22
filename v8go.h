@@ -242,7 +242,9 @@ extern RtnUnboundScript ScriptStreamCompile(IsolatePtr iso_ptr,
                                             const char* s,
                                             int s_len,
                                             const char* o,
-                                            int opaque);
+                                            int opaque,
+                                            int line_offset,
+                                            int column_offset);
 extern void ScriptStreamFree(ScriptStreamPtr stream);
 extern RtnUnboundScript IsolateCompileUnboundScript(IsolatePtr iso_ptr,
                                                     const char* source,

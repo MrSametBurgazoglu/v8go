@@ -4,6 +4,7 @@ package v8go
 // #include "v8go.h"
 import "C"
 import (
+	"errors"
 	"runtime"
 	"sync"
 	"unsafe"
@@ -117,11 +118,16 @@ func (s *ScriptStream) Finish() {
 func (s *ScriptStream) Done() <-chan struct{} { return s.done }
 
 // Compile waits for the background half and compiles the streamed script,
-// with source the text that was streamed. Only Opaque of opts is read.
-// The stream is released either way.
+// with source the text that was streamed. Opaque, LineOffset and
+// ColumnOffset of opts are read; a code cache is not (the stream is the
+// compile). The stream is released either way, and a stream already
+// compiled or closed answers an error.
 func (s *ScriptStream) Compile(source, origin string, opts CompileOptions) (*UnboundScript, error) {
 	s.Finish()
 	<-s.done
+	if s.ptr == nil {
+		return nil, errors.New("v8go: the script stream was already compiled or closed")
+	}
 	cSource := C.CString(source)
 	cOrigin := C.CString(origin)
 	defer C.free(unsafe.Pointer(cSource))
@@ -130,7 +136,8 @@ func (s *ScriptStream) Compile(source, origin string, opts CompileOptions) (*Unb
 	if opts.Opaque {
 		opaque = 1
 	}
-	rtn := C.ScriptStreamCompile(s.iso.ptr, s.ptr, cSource, C.int(len(source)), cOrigin, opaque)
+	rtn := C.ScriptStreamCompile(s.iso.ptr, s.ptr, cSource, C.int(len(source)), cOrigin, opaque,
+		C.int(opts.LineOffset), C.int(opts.ColumnOffset))
 	s.Close()
 	if rtn.ptr == nil {
 		return nil, newJSError(rtn.error)
